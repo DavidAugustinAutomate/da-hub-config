@@ -1,1 +1,1 @@
-# kgag-hub
+# da-hub-config
