@@ -1,0 +1,7 @@
+[Unit]
+Description=Container-Ueberwachung da-hub
+
+[Service]
+Type=oneshot
+ExecStart=/home/david/scripts/check-container.sh
+User=david

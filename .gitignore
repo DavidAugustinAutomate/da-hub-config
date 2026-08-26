@@ -1,0 +1,8 @@
+# Secrets und sensible Dateien niemals committen
+*.env
+.env
+*secret*
+*password*
+*.key
+*.crt
+config.yaml
