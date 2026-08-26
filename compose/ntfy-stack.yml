@@ -1,0 +1,20 @@
+services:
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: ntfy
+    restart: always
+    command:
+      - serve
+    environment:
+      - TZ=Europe/Zurich
+      - NTFY_BASE_URL=https://da-hub.taile9dad7.ts.net:10000
+      - NTFY_UPSTREAM_BASE_URL=https://ntfy.sh
+    ports:
+      - "9092:80"
+    volumes:
+      - ntfy_data:/var/lib/ntfy
+      - ntfy_cache:/var/cache/ntfy
+
+volumes:
+  ntfy_data:
+  ntfy_cache:
