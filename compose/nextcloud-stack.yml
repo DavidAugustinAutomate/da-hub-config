@@ -13,7 +13,7 @@ services:
       - MYSQL_USER=nextcloud
 
   nextcloud:
-    image: nextcloud:30
+    image: nextcloud:33
     container_name: nextcloud
     restart: always
     ports:
@@ -29,9 +29,9 @@ services:
       - MYSQL_PASSWORD=<ENTFERNT>
       - NEXTCLOUD_ADMIN_USER=david
       - NEXTCLOUD_ADMIN_PASSWORD=<ENTFERNT>
-      - NEXTCLOUD_TRUSTED_DOMAINS=100.93.33.0
-      - OVERWRITEHOST=100.93.33.0:8080
-      - OVERWRITEPROTOCOL=http
+      - NEXTCLOUD_TRUSTED_DOMAINS=da-hub.taile9dad7.ts.net localhost
+      - OVERWRITEHOST=da-hub.taile9dad7.ts.net
+      - OVERWRITEPROTOCOL=https
 
 volumes:
   nextcloud_db:
