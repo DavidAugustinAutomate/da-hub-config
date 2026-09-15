@@ -115,7 +115,12 @@ def claim_jobs(pg_conn, limit):
                WHERE id IN (
                    SELECT id FROM file_jobs
                    WHERE status = 'pending'
-                   ORDER BY (strpos(origin_path, '/Wissensbasis/da-agent/') > 0) DESC, id
+                   ORDER BY (strpos(origin_path, '/Wissensbasis/da-agent/') > 0) DESC,
+                            (strpos(origin_path, '/Verträge/') > 0) DESC,
+                            (strpos(origin_path, '/Kramer Gastronomie AG/') > 0) DESC,
+                            (strpos(origin_path, '/2026/') > 0
+                             OR strpos(origin_path, '/2025/') > 0) DESC,
+                            id
                    LIMIT %s
                    FOR UPDATE SKIP LOCKED
                )
