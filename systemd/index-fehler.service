@@ -1,0 +1,10 @@
+[Unit]
+Description=Wissensbasis: endgueltig gescheiterte Indexierungen melden
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+ExecStart=/home/david/scripts/check-index-fehler.sh
+TimeoutStartSec=300

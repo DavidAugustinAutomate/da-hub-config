@@ -1,0 +1,10 @@
+[Unit]
+Description=Taeglicher Bericht ueber nicht indexierte Dateien
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
