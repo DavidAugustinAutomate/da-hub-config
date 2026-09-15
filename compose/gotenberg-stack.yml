@@ -1,0 +1,7 @@
+services:
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: gotenberg
+    restart: always
+    ports:
+      - "3000:3000"

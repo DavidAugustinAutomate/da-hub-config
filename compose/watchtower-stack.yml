@@ -1,0 +1,14 @@
+services:
+  watchtower:
+    image: nickfedor/watchtower:latest
+    container_name: watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=Europe/Zurich
+      - WATCHTOWER_MONITOR_ONLY=true
+      - WATCHTOWER_SCHEDULE=0 0 8 * * *
+      - WATCHTOWER_NOTIFICATIONS=shoutrrr
+      - WATCHTOWER_NOTIFICATION_URL=generic+http://172.17.0.1:9092/dahub-alerts
+      - 'WATCHTOWER_NOTIFICATION_TEMPLATE={{range .}}{{.Time.Format "15:04"}} | {{.Message}}{{with .Data.container}} – {{.}}{{end}}{{with .Data.image}} ({{.}}){{end}}{{println}}{{end}}'

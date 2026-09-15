@@ -1,0 +1,16 @@
+[Unit]
+Description=Wissensbasis: Telegram-Bot
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david
+EnvironmentFile=/home/david/.dahub-env
+ExecStart=/usr/bin/python3 /home/david/telegram_bot.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

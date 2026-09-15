@@ -1,0 +1,10 @@
+[Unit]
+Description=Woechentlicher Versions-Check der gepinnten Container
+
+[Timer]
+OnCalendar=Mon 08:15
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

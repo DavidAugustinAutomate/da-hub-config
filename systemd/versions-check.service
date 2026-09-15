@@ -1,0 +1,10 @@
+[Unit]
+Description=Versions-Check der gepinnten Container (n8n, LiteLLM)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+ExecStart=/usr/bin/python3 /home/david/scripts/check-versionen.py
+TimeoutStartSec=300

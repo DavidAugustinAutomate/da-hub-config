@@ -1,0 +1,51 @@
+services:
+  postgres-vector:
+    image: pgvector/pgvector:pg16
+    container_name: postgres-vector
+    restart: always
+    shm_size: '1gb'
+    environment:
+      POSTGRES_DB: knowledge
+      POSTGRES_USER: dahub
+      POSTGRES_PASSWORD: CHANGE_ME
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+    ports:
+      - "100.93.33.0:5432:5432"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: always
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "100.93.33.0:11434:11434"
+
+  docling:
+    image: ghcr.io/docling-project/docling-serve:latest
+    container_name: docling
+    restart: always
+    environment:
+      DOCLING_OCR_LANG: "deu+eng"
+      DOCLING_DO_OCR: "true"
+      DOCLING_DO_TABLE_STRUCTURE: "true"
+    volumes:
+      - docling-tmp:/tmp/docling
+    ports:
+      - "100.93.33.0:5001:5001"
+
+  libreoffice:
+    image: libreofficedocker/libreoffice-unoserver:3.19
+    container_name: libreoffice
+    restart: always
+    ports:
+      - "100.93.33.0:2004:2004"
+    tmpfs:
+      - /tmp:size=1g
+    mem_limit: 2g
+
+volumes:
+  pgvector-data:
+  ollama-models:
+  docling-tmp:
