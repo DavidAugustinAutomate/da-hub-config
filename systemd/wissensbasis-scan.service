@@ -1,0 +1,17 @@
+[Unit]
+Description=Wissensbasis: Aenderungen in Nextcloud erkennen
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+EnvironmentFile=/home/david/.dahub-env
+ExecStart=/usr/bin/python3 /home/david/scan_wissensbasis_simple.py \
+  --nextcloud-url ${NEXTCLOUD_URL} \
+  --nextcloud-user ${NEXTCLOUD_USER} \
+  --nextcloud-password ${NEXTCLOUD_PASSWORD} \
+  --root-path /Wissensbasis \
+  --pg-host ${PG_HOST} --pg-port ${PG_PORT} \
+  --pg-db ${PG_DB} --pg-user ${PG_USER} --pg-password ${PG_PASSWORD}
+TimeoutStartSec=1800

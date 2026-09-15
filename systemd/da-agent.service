@@ -1,0 +1,16 @@
+[Unit]
+Description=da-agent (Always-on Agent, Telegram)
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=david
+WorkingDirectory=/home/david
+ExecStart=/usr/bin/python3 /home/david/da_agent.py --env-file /home/david/.da-agent-env
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

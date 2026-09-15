@@ -1,0 +1,19 @@
+[Unit]
+Description=Wissensbasis: Job-Queue abarbeiten (Docling, Embedding, pgvector)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+EnvironmentFile=/home/david/.dahub-env
+ExecStart=/usr/bin/python3 /home/david/process_jobs.py \
+  --nextcloud-url ${NEXTCLOUD_URL} \
+  --nextcloud-user ${NEXTCLOUD_USER} \
+  --nextcloud-password ${NEXTCLOUD_PASSWORD} \
+  --docling-url ${DOCLING_URL} \
+  --ollama-url ${OLLAMA_URL} \
+  --pg-host ${PG_HOST} --pg-port ${PG_PORT} \
+  --pg-db ${PG_DB} --pg-user ${PG_USER} --pg-password ${PG_PASSWORD} \
+  --limit 100 --parallel 2
+TimeoutStartSec=3600

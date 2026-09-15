@@ -1,0 +1,12 @@
+[Unit]
+Description=da-agent Nachtroutine (Tagesjournal, Gedaechtnis-Vorschlaege, Verdichtung)
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+WorkingDirectory=/home/david
+ExecStart=/usr/bin/python3 /home/david/da_agent.py --env-file /home/david/.da-agent-env --nacht
+TimeoutStartSec=1800
+Environment=PYTHONUNBUFFERED=1

@@ -1,0 +1,10 @@
+[Unit]
+Description=Wissensbasis-Scan alle 15 Minuten
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

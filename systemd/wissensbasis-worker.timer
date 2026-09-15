@@ -1,0 +1,10 @@
+[Unit]
+Description=Wissensbasis-Worker alle 5 Minuten
+
+[Timer]
+OnBootSec=12min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

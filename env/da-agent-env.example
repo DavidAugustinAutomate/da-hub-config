@@ -1,0 +1,41 @@
+# da-agent Konfiguration -> auf da-hub als /home/david/.da-agent-env ablegen, chmod 600
+# Format: KEY=
+
+# Telegram: Token des NEUEN Bots (BotFather), Chat-ID aus getUpdates
+TELEGRAM_TOKEN=
+ALLOWED_CHAT_ID=
+
+# LiteLLM-Gateway (Key vorerst aus ~/.dahub-env); Modell über eigenen Alias in der LiteLLM-Config
+GATEWAY_URL=
+GATEWAY_KEY=
+AGENT_MODEL=
+PROMPT_CACHE=
+
+# Wissensbasis
+OLLAMA_URL=
+PG_HOST=
+PG_PORT=
+PG_DB=
+PG_USER=
+PG_PASSWORD=
+FRAGE_PY_DIR=
+
+# Gedächtnis in Nextcloud (leer lassen =
+NC_URL=
+NC_USER=
+NC_APP_PASSWORD=
+NC_BASE=
+KERN_TARGET=
+MEMORY_SUGGESTIONS=
+
+# Mailversand (leer lassen =
+SMTP_HOST=
+SMTP_PORT=
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=
+
+# Verhalten
+TZ_NAME=
+HISTORY_MESSAGES=
+MAX_TOOL_STEPS=
