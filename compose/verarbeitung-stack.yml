@@ -1,3 +1,5 @@
+name: wissensdatenbank
+
 services:
   postgres-vector:
     image: pgvector/pgvector:pg16
@@ -14,7 +16,7 @@ services:
       - "100.93.33.0:5432:5432"
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.33.3
     container_name: ollama
     restart: always
     volumes:
@@ -23,7 +25,7 @@ services:
       - "100.93.33.0:11434:11434"
 
   docling:
-    image: ghcr.io/docling-project/docling-serve:latest
+    image: ghcr.io/docling-project/docling-serve:v1.32.0
     container_name: docling
     restart: always
     environment:
