@@ -331,6 +331,16 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 
 ---
 
+## Plan (Stand 28.09.2026)
+
+1. **Nächste Sitzung – Phase 3 minimal + DNS:**
+   - `dahub-update.timer`: sonntags 03:30 (nach der Nachtroutine), `dahub-update.sh --gruppe auto`, als `david`
+   - Wochenbilanz am Montag: eine ntfy-Zeile mit dem Ergebnis des Sonntagslaufs (aktualisiert / zurückgenommen / Fehler)
+   - Watchtower abschalten (Stack 4; Update-Suche übernimmt `dahub-update.sh`, n8n/LiteLLM meldet `check-versionen.py`)
+   - DNS-Behebung (offener Punkt K): `resolv.conf` dauerhaft mit Tailscale-Resolver, danach Rückkehr von `notify.sh` auf den Namen prüfen oder bewusst bei `127.0.0.1` bleiben
+2. **Danach gilt das Aufsetzen als abgeschlossen.** Phase 4 (Freigabe-Knopf im Telegram-Agenten) ist **zurückgestellt**; n8n und LiteLLM bis dahin von Hand mit `dahub-update.sh --dienst … --version …`
+3. **Dann:** Punkt G (steigende Zahl endgültig gescheiterter Indexierungen) und anschliessend die Anwendungen (Roadmap «Agent richtig einsetzen»)
+
 ## Offene Punkte
 
 ### Aus Phase 1 (27.09.2026)
