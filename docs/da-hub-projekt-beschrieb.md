@@ -65,7 +65,7 @@ Container mit `restart: always`.
 
 | Quelle | Projektname (`name:`) | Container | Image (gepinnt) | Secrets |
 |---|---|---|---|---|
-| `~/stacks/gotenberg/` | `gotenberg` | gotenberg | `gotenberg/gotenberg:8.36.0` | – |
+| `~/stacks/gotenberg/` | `gotenberg` | gotenberg | `gotenberg/gotenberg:8.37.0` (seit 28.09. per `dahub-update.sh`) | – |
 | `~/stacks/ntfy/` | `ntfy` | ntfy | `binwiederhier/ntfy:v2.28.0` | – |
 | `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.32.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
 | `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
@@ -266,7 +266,11 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 
 - `~/scripts/check-container.sh`: 11 Container, Status + Port-Erreichbarkeit, 6 h Wiederholungssperre, Erholungsmeldung, Timer 5 min
 - `~/scripts/smart-alert.sh`: SMART/NVMe
-- `~/scripts/notify.sh`: ntfy mit Antwortprüfung, Log `~/.local/state/dahub-notify.log`; msmtp als Ersatzkanal (**nicht installiert**, `~/.msmtprc` fehlt)
+- `~/scripts/notify.sh`: ntfy mit Antwortprüfung, Log `~/.local/state/dahub-notify.log`; msmtp als Ersatzkanal (**nicht installiert**, `~/.msmtprc` fehlt). **Seit 28.09. direkt an `http://127.0.0.1:9092/dahub-alerts`** (vorher über `https://da-hub.taile9dad7.ts.net:10000`, scheiterte vom 21.09. bis 28.09., siehe offener Punkt K)
+- `check-container.sh` schweigt seit 28.09., solange das Wartungsflag `~/.local/state/dahub-wartung` besteht; ist es älter als 3 h, meldet es das
+- `nextcloud-cron.timer`: Nextcloud-Hintergrundjobs alle 5 min (`cron.php` im Container), Modus `cron` seit 28.09. (vorher AJAX)
+- `~/stacks/bin/dahub-update.sh` (Phase 2): `--pruefen` zeigt fällige Updates; `--gruppe auto` bzw. `--dienst X [--version V]` aktualisiert mit Tests und Rückfall. Log `~/.local/state/dahub-update.log`. Karenzzeit 7 Tage, Linien in `dienste.conf`. Ollama-Test mit Kosinus-Vergleich zur Referenz `~/stacks/tests/ollama-referenz.json` (≥ 0.999)
+- Wartungsflag `~/.local/state/dahub-wartung` pausiert Worker, Scan und Nextcloud-Cron über feste Drop-ins `dahub-wartung.conf` (`ConditionPathExists=!…`)
 - `~/scripts/check-index-fehler.sh` + `index-fehler.timer`: täglich 08:00, meldet endgültig gescheiterte Indexierungen (siehe Wissensbasis)
 - `check-versionen.py` + `versions-check.timer`: **wöchentlich**, montags 08:15; prüft die gepinnten Images n8n und LiteLLM auf neuere Versionen, mit Wiederholungssperre. Stand 15.09.: n8n 2.37.10 → 2.39.5, LiteLLM 1.85.0 → 1.101.0 verfügbar
 - `unattended-upgrades` 2.12 installiert und aktiv (`APT::Periodic::Unattended-Upgrade "1"`)
@@ -293,6 +297,10 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 2. **Nextcloud übernommen** nach `~/stacks/nextcloude/` bei pausiertem Worker (Flag) und gestopptem Scan-Timer: `.env` per `stack-env-schreiben.py` aus der Portainer-Datei (10 Variablen, gemeinsame Namen in beiden Diensten mit gleichem Wert), Compose-Datei auf Basis der Portainer-Datei (Repo fehlte der Healthcheck), Config-Hash beider Dienste mit den bisherigen Tags identisch, Variablen pro Dienst unter `environment` als `${VAR}` (kein `env_file`). Gepinnt: `nextcloud:33.0.8` (= bisher laufend), `mariadb:11.4.13` (Neubau derselben Version, altes Image als Rückfall-Tag). Wartungsmodus an → Dump `nextcloud-20260928-1956.sql` + `version.php` → Neuerstellung beider Container → Wartungsmodus aus. Tests vorher und nachher grün: `occ status` (33.0.8, kein DB-Upgrade), WebDAV als `wissensbasis-bot` (207, gleiche Zugangsdaten wie der Scanner), Funnel `status.php`, App-Passwörter unverändert (22, inkl. `n8n-2026-09`), healthy. Commit `27bd1ff`
 3. **Schlafende Laufzeit-Maske** `/run/systemd/system/wissensbasis-worker.service -> /dev/null` (seit 27.09. 20:31, von einem zweiten `mask --runtime`) gefunden und entfernt – sie wäre beim nächsten `daemon-reload` wirksam geworden. `pause.conf` war entgegen dem Anschein nie gelöscht (Verzeichnis-mtime unverändert)
 4. Damit ist **Phase 1 abgeschlossen** bis auf Watchtower (Entscheid Phase 3)
+5. **Nextcloud-Cron** (Punkt D): `nextcloud-cron.service/.timer` alle 5 min, Modus `cron` (der erste Lauf von `cron.php` hat von AJAX selbst umgestellt), `lastcron` läuft im 5-Minuten-Takt
+6. **Phase 2 – `dahub-update.sh`** gebaut und eingerichtet (Commit `632f86d`): Versionssuche über Registry (Docker-Hub-API bzw. ghcr), Linie pro Dienst, Karenzzeit 7 Tage, ollama nur Patches 0.33.x, Rückfall-Tag `dahub-rueckfall/<dienst>:vorher`, automatischer Rückfall bei rotem Test, Nextcloud mit Wartungsmodus, Dump über App-Benutzer, `version.php`, Warten auf healthy vor `occ upgrade`, bei Fehler Wartungsmodus an + dringende Meldung. Feste Drop-ins `dahub-wartung.conf` für Worker/Scan, `check-container.sh` schweigt während des Flags. Review-Befunde eingearbeitet, Mocktests grün
+7. **Erstes echtes Update:** `--dienst gotenberg` 8.36.0 → 8.37.0, Test grün, Commit `b9beeb8`
+8. **ntfy-Meldungen seit 21.09. verloren** (DNS, Punkt K): 13 Meldungen, darunter eine Störung. `notify.sh` sendet jetzt direkt an `127.0.0.1:9092` (Commit `b147a34`), Testmeldung zugestellt. Das Repo enthielt noch die `notify.sh` von vor dem 09.09.
 
 ---
 
@@ -330,12 +338,15 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 A. ~~Nextcloud-Übernahme (Stack 2)~~ **erledigt 28.09.2026 19:56** (siehe Änderungsprotokoll 28.09.). Offen daraus nur noch: n8n-Credential «NextCloud account» einmal von Hand mit «Test» prüfen; Funnel einmal von aussen (Mobilnetz) aufrufen
 B. **LAN-Erreichbarkeit der Ports 5678 (n8n), 8080 (nextcloud), 3000 (gotenberg) und 9092 (ntfy) prüfen.** Alle vier sind auf 0.0.0.0 gebunden; Docker umgeht ufw häufig. Tailscale Serve/Funnel zeigen auf `localhost`/`127.0.0.1`, eine Bindung auf `127.0.0.1` würde genügen
 C. Nextcloud 33.0.9 verfügbar – erster Anwendungsfall für `dahub-update.sh` (Phase 2)
-D. **Nextcloud-Hintergrundjobs von AJAX auf Cron per systemd-Timer umstellen** (bei der Übernahme am 28.09. bewusst noch nicht gemacht; eigener Schritt). Heute Modus «AJAX», letzter Lauf 26.09. 12:25 – Jobs laufen nur, wenn jemand die Weboberfläche öffnet
+D. ~~Nextcloud-Hintergrundjobs auf Cron umstellen~~ **erledigt 28.09.2026** (`nextcloud-cron.timer`, Modus `cron`, siehe Änderungsprotokoll)
 E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen
 F. Portainer-Einträge 1, 2, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
-G. `failed` in `file_jobs` von 597 (15.09.) auf 1'072 gestiegen – mit dem Rückholen (Punkt 1) zusammen anschauen
+G. **Endgültig gescheiterte Indexierungen steigen stark:** laut täglicher Fehlermeldung **587 (20.09.) → 1'106 (28.09.) in 8 Tagen**, rund 65 pro Tag (`file_jobs.failed` 597 am 15.09., 1'072 am 27.09.). Blieb unbemerkt, weil die Meldungen seit 21.09. nicht zugestellt wurden (Punkt K). Die «neu»-Zahl der Meldung summiert sich seither auf (523 am 28.09.), weil die IDs nur nach erfolgreichem Versand gemerkt werden. Ursache (Fehlertypen) vordringlich untersuchen; mit dem Rückholen (Punkt 1) zusammen anschauen
 H. Viele alte Nextcloud-Sitzungen/App-Passwörter (Desktop-Clients, Browser, «n8n» vom 24.08.) aufräumen
 I. **MariaDB-Root-Passwort klären:** `MYSQL_ROOT_PASSWORD` (32 Zeichen) wird für `root@localhost` abgewiesen. Klären, welches Passwort gilt bzw. ob Root per Socket/ohne Passwort eingerichtet ist; danach Variable und DB in Einklang bringen (`~/stacks/nextcloude/.env`). Dumps laufen bis dahin über den App-Benutzer
+J. **`MARIADB_AUTO_UPGRADE` prüfen** (Review 28.09. zu `dahub-update.sh`, nur notiert): Ohne diese Variable führt das MariaDB-Image nach einem Versionssprung `mariadb-upgrade` nicht selbst aus. Für Patches innerhalb 11.4.x meist unkritisch; vor einem Wechsel der Linie (z. B. 11.8) klären, ob die Variable gesetzt oder `mariadb-upgrade` im Skript aufgerufen wird. Hängt mit Punkt I zusammen (Root-Zugang)
+K. **DNS des Servers: `dhcpcd` überschreibt `/etc/resolv.conf`** (Umsetzung in eigener Sitzung, sudo). Seit **20.09. 15:35** steht dort «Generated by dhcpcd from eno2.dhcp, eno2.dhcp6, eno2.ra» mit Router und Provider-DNS, ohne Tailscale-Resolver `100.100.100.100`. Folge: Der Server löst `da-hub.taile9dad7.ts.net` öffentlich auf (Funnel-IPv6 `2a00:dd80:20::…`), Port 10000/8443 sind dort nicht erreichbar → **alle ntfy-Meldungen vom 21.09. bis 28.09. gescheitert (13, HTTP 000)**, darunter eine Störungsmeldung. Behelf seit 28.09.: `notify.sh` sendet direkt an `http://127.0.0.1:9092`. Befund (nur lesend): `eno2` per ifupdown mit `dhcpcd` (Debian 13), Tailscale verwaltet DNS direkt über `resolv.conf` (kein `systemd-resolved`), MagicDNS selbst funktioniert (`dig @100.100.100.100` → `100.93.33.0`), **NetworkManager und ifupdown sind beide aktiv**. Tritt bei jeder Lease-Erneuerung wieder auf; ein Tailscale-Neustart repariert nur vorübergehend. Optionen: (a) `nohook resolv.conf` in `/etc/dhcpcd.conf`, (b) `systemd-resolved` einführen (Tailscale integriert sich dort sauber), (c) nur `/etc/hosts`-Eintrag für den eigenen Namen. Vorher mit sudo den Auslöser prüfen: `sudo journalctl --since '2026-09-20 15:30' --until '2026-09-20 15:40'`. `david` ist nicht in `adm`/`systemd-journal` und sieht das Systemjournal nicht
+L. **Repo-Stände der Skripte gegen den Server abgleichen:** `check-container.sh` und `notify.sh` lagen im Repo noch in der Fassung vor dem 09.09. (am 28.09. nachgeführt). Übrige Skripte in `scripts/` und Units in `systemd/` einmal mit `diff` gegen den Server prüfen
 
 ### Bisherige
 
