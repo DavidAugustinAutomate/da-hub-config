@@ -1,0 +1,10 @@
+[Unit]
+Description=Woechentliche Container-Updates (sonntags 03:30, nach der Nachtroutine)
+
+[Timer]
+OnCalendar=Sun 03:30
+# Verpassten Lauf nach Neustart nachholen (Startverzoegerung im Service)
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=dahub-update: woechentliche Container-Updates (Gruppe auto)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=david
+# Nachgeholter Lauf (Persistent=true) erst, wenn der Server 15 min laeuft; im Normalfall ohne Wartezeit
+ExecStartPre=/bin/sh -c 'u=$(cut -d. -f1 /proc/uptime); [ "$u" -ge 900 ] || sleep $((900 - u))'
+ExecStart=/home/david/stacks/bin/dahub-update.sh --gruppe auto --still
+# Startverzoegerung bis 15 min + Warten auf Worker bis 70 min + Updates und Tests
+TimeoutStartSec=3h

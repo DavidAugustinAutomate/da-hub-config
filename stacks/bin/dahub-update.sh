@@ -4,8 +4,10 @@
 #   dahub-update.sh --pruefen [--gruppe auto|freigabe | --dienst NAME]   zeigt nur, was geschehen wuerde
 #   dahub-update.sh --gruppe auto                                        aktualisiert alle faelligen Dienste der Gruppe
 #   dahub-update.sh --dienst NAME [--version TAG]                        ein Dienst; --version fuer Freigabe/Major
+#   --still                                                              keine Meldung bei Erfolg/nichts faellig (Timer)
 #
 # Laeuft als david (Gruppe docker). Werte aus .env-Dateien werden nie ausgegeben.
+# Ergebnis jedes --gruppe-Laufs in ~/.local/state/dahub-update-ergebnis-<gruppe> (fuer dahub-wochenbilanz.sh).
 # Pause von Worker/Scan/Nextcloud-Cron ueber das Wartungsflag (feste Drop-ins dahub-wartung.conf).
 set -euo pipefail
 umask 077
@@ -24,7 +26,7 @@ KARENZ=7
 DUMPS_BEHALTEN=4
 WORKER_MAX=4200                                   # max. Wartezeit auf einen laufenden Worker (s)
 PAUSE_UNITS="wissensbasis-worker.service wissensbasis-scan.service nextcloud-cron.service"
-WORKER_DIENSTE=" docling ollama libreoffice nextcloud nextcloud-db "
+WORKER_DIENSTE=" docling ollama libreoffice nextcloud nextcloud-db postgres-vector "
 LITELLM_VERBOTEN=" 1.82.7 v1.82.7 1.82.8 v1.82.8 "
 H=100.93.33.0
 OLLAMA_REF=$HOME/stacks/tests/ollama-referenz.json
@@ -32,15 +34,16 @@ OLLAMA_SATZ="Der Mietvertrag fuer den Standort Zuerich wird per 31. Dezember gek
 OLLAMA_SCHWELLE=0.999
 
 # ------------------------------------------------------------------ Argumente
-modus=update; gruppe=""; dienst=""; version=""
+modus=update; gruppe=""; dienst=""; version=""; still=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pruefen) modus=pruefen ;;
+    --still) still=1 ;;
     --ollama-referenz) modus=referenz ;;
     --gruppe) gruppe=${2:?}; shift ;;
     --dienst) dienst=${2:?}; shift ;;
     --version) version=${2:?}; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $1"; exit 2 ;;
   esac
   shift
@@ -52,13 +55,18 @@ mkdir -p "$STATE"
 tmp=$(mktemp -d)
 log() { echo "$(date '+%F %T') $*"; }
 melden() { "$NOTIFY" "$1" "$2" "${3:-default}" >/dev/null 2>&1 || log "WARNUNG: notify.sh fehlgeschlagen"; }
+ergebnis() {  # $1 rc, $2 Text – nur fuer --gruppe-Laeufe, atomar ersetzt
+  [ -n "$gruppe" ] || return 0
+  local f=$STATE/dahub-update-ergebnis-$gruppe
+  printf 'zeit=%s\nepoch=%s\nrc=%s\ntext=%s\n' "$(date '+%F %T')" "$(date +%s)" "$1" "${2//$'\n'/ }" > "$f.tmp" && mv "$f.tmp" "$f"
+}
 
 # ------------------------------------------------------------------ Dienstliste
-declare -A DIR IMG LINIE GRUPPE TEST REPOF
+declare -A DIR IMG LINIE GRUPPE TEST REPOF MELDE
 REIHE=()
-while read -r n d i l g t r; do
+while read -r n d i l g t r m; do
   [ -z "${n:-}" ] || [[ "$n" == \#* ]] && continue
-  DIR[$n]=${d/#\~/$HOME}; IMG[$n]=$i; LINIE[$n]=$l; GRUPPE[$n]=$g; TEST[$n]=$t; REPOF[$n]=$r
+  DIR[$n]=${d/#\~/$HOME}; IMG[$n]=$i; LINIE[$n]=$l; GRUPPE[$n]=$g; TEST[$n]=$t; REPOF[$n]=$r; MELDE[$n]=${m:--}
   REIHE+=("$n")
 done < "$CONF"
 
@@ -71,6 +79,11 @@ done
 
 compose() { docker compose --project-directory "${DIR[$1]}" -f "${DIR[$1]}/docker-compose.yml" "${@:2}"; }
 tag_in_datei() {  # aktueller Tag des Dienstes laut Compose-Datei (ohne Aufloesung von Werten)
+  if [ "${DIR[$1]}" = "-" ]; then  # ohne Compose-Datei: Tag des laufenden Containers
+    local img; img=$(docker inspect -f '{{.Config.Image}}' "$1") || return 1
+    img=${img##*/}; [[ "$img" == *:* ]] && echo "${img##*:}" || echo latest
+    return
+  fi
   compose "$1" config --no-interpolate --format json | python3 -c '
 import json, sys
 img = json.load(sys.stdin)["services"][sys.argv[1]]["image"]
@@ -80,11 +93,11 @@ print(img.rsplit(":", 1)[1] if ":" in img.split("/")[-1] else "latest")' "$1"
 # ------------------------------------------------------------------ Tests (0 = gruen)
 occ() { docker exec -u www-data nextcloud php occ "$@"; }
 envwert() {  # Wert aus einer env-Datei, nie ausgeben
-  local w; w=$(sed -n -E "s/^(export[[:space:]]+)?$2=//p" "$1" | head -1)
+  local w; w=$(sed -n -E "s/^(export[[:space:]]+)?$2=//p" "$1"); w=${w%%$'\n'*}   # erste Zeile, ohne Pipe (pipefail/SIGPIPE)
   w=${w#\"}; w=${w%\"}; w=${w#\'}; w=${w%\'}; printf '%s' "$w"
 }
 hostport() {  # Adresse eines veroeffentlichten Ports; 0.0.0.0 -> 127.0.0.1
-  local b; b=$(docker port "$1" "$2" 2>/dev/null | head -1); [ -n "$b" ] || return 1
+  local b; b=$(docker port "$1" "$2" 2>/dev/null) || return 1; b=${b%%$'\n'*}; [ -n "$b" ] || return 1
   local hip=${b%:*}; case "$hip" in 0.0.0.0|"[::]") hip=127.0.0.1 ;; esac
   echo "$hip:${b##*:}"
 }
@@ -143,10 +156,12 @@ t_nextcloud() {  # erwartete Version aus der Compose-Datei; WebDAV mit den Zugan
 import json, sys
 d = json.load(sys.stdin)
 sys.exit(0 if d.get("installed") and not d.get("maintenance") and not d.get("needsDbUpgrade") and d.get("versionstring") == sys.argv[1] else 1)' "$soll" || return 1
-  url=$(grep -oE -- '--nextcloud-url[= ]+[^ ]+' "$unit" | head -1 | sed -E 's/^--nextcloud-url[= ]+//; s/^"//; s/"$//')
+  url=$(grep -oE -- '--nextcloud-url[= ]+[^ ]+' "$unit") || return 1; url=${url%%$'\n'*}
+  url=$(sed -E 's/^--nextcloud-url[= ]+//; s/^"//; s/"$//' <<<"$url")
   if [[ "$url" =~ ^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$ ]]; then url=$(envwert "$HOME/.dahub-env" "${BASH_REMATCH[1]}"); fi
   url=${url%/}
-  var=$(grep -oE -- '--nextcloud-password[= ]+"?\$\{?[A-Za-z_][A-Za-z0-9_]*' "$unit" | head -1 | grep -oE '[A-Za-z_][A-Za-z0-9_]*$')
+  var=$(grep -oE -- '--nextcloud-password[= ]+"?\$\{?[A-Za-z_][A-Za-z0-9_]*' "$unit") || return 1; var=${var%%$'\n'*}
+  var=$(grep -oE '[A-Za-z_][A-Za-z0-9_]*$' <<<"$var") || return 1
   pw=$(envwert "$HOME/.dahub-env" "$var"); [ -n "$pw" ] || return 1
   urlvar=${url#*://}; urlvar=${urlvar%%/*}
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 30 -X PROPFIND -H 'Depth: 0' \
@@ -155,6 +170,14 @@ sys.exit(0 if d.get("installed") and not d.get("maintenance") and not d.get("nee
   [ "$code" = 207 ] || return 1
   j=$(curl -s -m 20 "https://da-hub.taile9dad7.ts.net/status.php") || return 1
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get("installed") and not d.get("maintenance") else 1)' "$j" 2>/dev/null
+}
+t_pgvector() {  # Erweiterung vector vorhanden, Port fuer den Worker erreichbar
+  local v; v=$(docker exec postgres-vector psql -U dahub -d knowledge -qAtc "SELECT extversion FROM pg_extension WHERE extname='vector'" 2>/dev/null) || return 1
+  grep -qE '^[0-9]+\.' <<<"$v" || return 1
+  timeout 5 bash -c "exec 3<>/dev/tcp/$H/5432" 2>/dev/null
+}
+t_portainer() {
+  [ "$(curl -sk -o /dev/null -w '%{http_code}' -m 10 https://127.0.0.1:9443/api/system/status)" = 200 ]
 }
 t_n8n() {
   local hp; hp=$(hostport n8n 5678/tcp) || return 1
@@ -198,17 +221,28 @@ fi
 # ------------------------------------------------------------------ Plan
 declare -A ALT NEU ART INFO
 plane() {
-  local n=$1 t j
+  local n=$1 t j linie=${LINIE[$1]} meld=""
   t=$(tag_in_datei "$n"); ALT[$n]=$t; NEU[$n]=""; ART[$n]=keine; INFO[$n]=""
+  if [ "${DIR[$n]}" = "-" ] && [ "$modus" != pruefen ]; then INFO[$n]="ohne Compose-Datei: nur Meldung, Update von Hand"; return; fi
   if [ -n "$version" ]; then
     if [ "$n" = litellm ] && [[ "$LITELLM_VERBOTEN" == *" $version "* ]]; then INFO[$n]="VERBOTEN: LiteLLM $version ist kompromittiert"; return; fi
-    [ "$version" = "$t" ] && { INFO[$n]="bereits $t"; return; }
+    if [ "$version" = "$t" ]; then  # gleicher Tag: Neubau ziehen (aktualisiere prueft die Image-ID)
+      case "$n" in nextcloud|nextcloud-db) INFO[$n]="bereits $t"; return ;; esac
+      NEU[$n]=$t; ART[$n]=neubau; INFO[$n]="--version (gleicher Tag, Neubau falls vorhanden)"; return
+    fi
     NEU[$n]=$version; ART[$n]=version; INFO[$n]="--version"; return
   fi
-  if [ "${LINIE[$n]}" = "-" ]; then INFO[$n]="nur mit --version (Freigabe)"; return; fi
+  if [ "$linie" = "-" ]; then
+    if [ "$modus" = pruefen ] && [ "${MELDE[$n]}" != "-" ]; then
+      linie=${MELDE[$n]}; meld="nur Meldung (Freigabe)"
+      [ "${DIR[$n]}" = "-" ] && meld+=", Update von Hand"
+    else
+      INFO[$n]="nur mit --version (Freigabe)"; return
+    fi
+  fi
   local id digs; id=$(docker inspect -f '{{.Image}}' "$n" 2>/dev/null || true)
   digs=$(docker image inspect -f '{{join .RepoDigests ","}}' "$id" 2>/dev/null || true)
-  j=$(python3 "$NV" "${IMG[$n]}" "$t" "${LINIE[$n]}" "$KARENZ" "$id,$digs")
+  j=$(python3 "$NV" "${IMG[$n]}" "$t" "$linie" "$KARENZ" "$id,$digs")
   local teile=()
   mapfile -t teile < <(python3 -c '
 import json, sys
@@ -225,6 +259,7 @@ print(d.get("neu") or "")
 print(d.get("art") or "keine")
 print("; ".join(info))' "$j")
   NEU[$n]=${teile[0]:-}; ART[$n]=${teile[1]:-keine}; INFO[$n]=${teile[2]:-}
+  [ -z "$meld" ] || INFO[$n]="$meld${INFO[$n]:+; ${INFO[$n]}}"
 }
 
 if [ "$modus" = update ]; then
@@ -234,21 +269,23 @@ if [ "$modus" = update ]; then
   log "=== dahub-update ${gruppe:+--gruppe $gruppe}${dienst:+--dienst $dienst}${version:+ --version $version} ==="
 fi
 for n in "${auswahl[@]}"; do plane "$n"; done
-faellig=()
-printf '%-13s %-12s %-12s %-8s %s\n' DIENST LAEUFT NEU ART HINWEIS
+faellig=(); nurmeldung=()
+printf '%-15s %-12s %-12s %-8s %s\n' DIENST LAEUFT NEU ART HINWEIS
 for n in "${auswahl[@]}"; do
-  printf '%-13s %-12s %-12s %-8s %s\n' "$n" "${ALT[$n]}" "${NEU[$n]:--}" "${ART[$n]}" "${INFO[$n]}"
-  [ -n "${NEU[$n]}" ] && faellig+=("$n")
+  printf '%-15s %-12s %-12s %-8s %s\n' "$n" "${ALT[$n]}" "${NEU[$n]:--}" "${ART[$n]}" "${INFO[$n]}"
+  [ -n "${NEU[$n]}" ] || continue
+  if [[ "${INFO[$n]}" == "nur Meldung"* ]]; then nurmeldung+=("$n"); else faellig+=("$n"); fi
 done
 if [ "$modus" = pruefen ]; then
-  echo; echo "Modus --pruefen: nichts veraendert. Faellig: ${faellig[*]:-keine}"
+  echo; echo "Modus --pruefen: nichts veraendert. Faellig: ${faellig[*]:-keine}; nur Meldung: ${nurmeldung[*]:-keine}"
   rm -rf "$tmp"; exit 0
 fi
 
 # ================================================================== Ab hier Aenderungen
 if [ ${#faellig[@]} -eq 0 ]; then
   log "Nichts zu tun."
-  [ -n "$gruppe" ] && melden "da-hub: Updates" "Keine Updates faellig (${#auswahl[@]} Dienste geprueft)." low
+  ergebnis 0 "Keine Updates faellig (${#auswahl[@]} Dienste geprueft)."
+  [ -n "$gruppe" ] && [ "$still" = 0 ] && melden "da-hub: Updates" "Keine Updates faellig (${#auswahl[@]} Dienste geprueft)." low
   rm -rf "$tmp"; exit 0
 fi
 
@@ -260,6 +297,7 @@ aufraeumen() {
   fi
   rm -rf "$tmp"
   if [ "$rc" -ne 0 ] && [ "${fertig:-0}" != 1 ]; then
+    ergebnis "$rc" "ABGEBROCHEN (rc=$rc), siehe $LOG"
     melden "da-hub: Update ABGEBROCHEN" "dahub-update brach unerwartet ab (rc=$rc). Log: $LOG" urgent
   fi
 }
@@ -270,7 +308,8 @@ trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 touch "$FLAG"; flag_von_uns=1
 log "Wartungsflag gesetzt: $FLAG"
 for u in $PAUSE_UNITS; do
-  systemctl cat "$u" 2>/dev/null | grep -qF "ConditionPathExists=!$FLAG" || { log "ABBRUCH: $u kennt das Wartungsflag nicht (Drop-in fehlt)"; exit 1; }
+  # nie "systemctl … | grep -q" unter pipefail: grep beendet sich beim Treffer, systemctl bekommt SIGPIPE (28.09.: 182/200 falsch)
+  grep -qF "ConditionPathExists=!$FLAG" <<<"$(systemctl cat "$u" 2>/dev/null)" || { log "ABBRUCH: $u kennt das Wartungsflag nicht (Drop-in fehlt)"; exit 1; }
   [ "$(systemctl show -p NeedDaemonReload --value "$u")" = no ] || { log "ABBRUCH: $u braucht daemon-reload"; exit 1; }
 done
 log "Drop-ins geladen: $PAUSE_UNITS"
@@ -280,7 +319,8 @@ for n in "${faellig[@]}"; do [[ "$WORKER_DIENSTE" == *" $n "* ]] && braucht_work
 if [ "$braucht_worker_pause" = 1 ]; then
   log "Warte auf Ende laufender Worker-/Scan-/Cron-Laeufe (max. $((WORKER_MAX / 60)) min) ..."
   start=$(date +%s)
-  while systemctl show -p ActiveState --value $PAUSE_UNITS | grep -qvxE 'inactive|failed'; do
+  # leere Ausgabe (systemctl-Fehler) zaehlt als aktiv -> weiter warten
+  while grep -qvxE 'inactive|failed' <<<"$(systemctl show -p ActiveState --value $PAUSE_UNITS)"; do
     [ $(( $(date +%s) - start )) -lt "$WORKER_MAX" ] || { log "ABBRUCH: Worker nach $((WORKER_MAX / 60)) min noch aktiv"; melden "da-hub: Update abgebrochen" "Worker lief nach $((WORKER_MAX / 60)) min noch – nichts aktualisiert." high; exit 1; }
     sleep 30
   done
@@ -367,7 +407,7 @@ aktualisiere_nextcloud() {
     rot+=("nextcloud (Dump)"); melden "da-hub: Nextcloud-Update ausgelassen" "Dump fehlgeschlagen – nichts veraendert, Wartungsmodus wieder aus." high; return
   fi
   create=$(grep -c '^CREATE TABLE' "$dump" || true)
-  if [ "$create" != "$tabellen" ] || ! tail -1 "$dump" | grep -q '^-- Dump completed'; then
+  if [ "$create" != "$tabellen" ] || ! grep -q '^-- Dump completed' <<<"$(tail -1 "$dump")"; then
     cp "$tmp/nextcloud.yml.vorher" "$f"; occ maintenance:mode --off; nc_wartung=0
     rot+=("nextcloud (Dump unvollstaendig)"); melden "da-hub: Nextcloud-Update ausgelassen" "Dump unvollstaendig ($create/$tabellen) – nichts veraendert." high; return
   fi
@@ -404,7 +444,7 @@ aktualisiere_nextcloud() {
     return
   fi
   log "Nextcloud healthy"
-  if occ status --output=json 2>/dev/null | grep -q '"needsDbUpgrade":true'; then
+  if grep -q '"needsDbUpgrade":true' <<<"$(occ status --output=json 2>/dev/null)"; then
     log "needsDbUpgrade=true -> occ upgrade"
     occ upgrade || log "WARNUNG: occ upgrade mit Fehler beendet"
   fi
@@ -439,8 +479,10 @@ zusammen="aktualisiert: ${#ok[@]}"
 [ ${#rot[@]} -gt 0 ] && zusammen+="; FEHLER: ${rot[*]}"
 log "Ergebnis: $zusammen"
 if [ ${#rot[@]} -eq 0 ] && [ ${#zurueck[@]} -eq 0 ]; then
-  melden "da-hub: Updates" "${#ok[@]} Dienste aktualisiert, alle Tests gruen. ${ok[*]}" low
+  ergebnis 0 "${#ok[@]} Dienste aktualisiert, alle Tests gruen. ${ok[*]}"
+  [ "$still" = 1 ] || melden "da-hub: Updates" "${#ok[@]} Dienste aktualisiert, alle Tests gruen. ${ok[*]}" low
   exit 0
 fi
+ergebnis 1 "$zusammen"
 [ ${#rot[@]} -eq 0 ] || melden "da-hub: Updates mit Fehlern" "$zusammen" high
 exit 1

@@ -1,3 +1,5 @@
+# STILLGELEGT 28.09.2026: Container gestoppt (restart=no), ersetzt durch dahub-update.sh + dahub-wochenbilanz.sh.
+# Nicht mehr deployen. Rueckweg: docker update --restart=always watchtower && docker start watchtower
 services:
   watchtower:
     image: nickfedor/watchtower:latest

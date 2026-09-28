@@ -1,0 +1,9 @@
+[Unit]
+Description=da-hub Wochenbilanz (montags 08:05)
+
+[Timer]
+OnCalendar=Mon 08:05
+Persistent=true
+
+[Install]
+WantedBy=timers.target

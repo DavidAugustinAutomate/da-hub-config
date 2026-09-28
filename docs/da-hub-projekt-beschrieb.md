@@ -46,7 +46,7 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | Dienst | Adresse | Bemerkung |
 |---|---|---|
 | Cockpit | `https://100.93.33.0:9090` | Server-Verwaltung |
-| Portainer | `https://100.93.33.0:9443` | Nur noch Anzeige; Stacks 1, 2, 3, 5, 6 sind nach `~/stacks/` übernommen (nur Stack 4 Watchtower noch nicht) (Einträge stehen noch, **nicht mehr darüber deployen**). Container selbst von Hand gestartet |
+| Portainer | `https://100.93.33.0:9443` | Nur noch Anzeige; Stacks 1, 2, 3, 5, 6 sind nach `~/stacks/` übernommen, Stack 4 (Watchtower) ist gestoppt (Einträge stehen noch, **nicht mehr darüber deployen**). Container selbst von Hand gestartet; Updates von Hand, `dahub-update.sh --pruefen` meldet Neubauten von `latest` |
 | LiteLLM-Gateway | `http://100.93.33.0:4000` | v1.85.0 gepinnt, ohne Datenbank; Compose in `~/litellm/` |
 | n8n | `https://da-hub.taile9dad7.ts.net:8443` | v2.37.10, Tailscale Serve → `localhost:5678`; Host-Port `5678` auf 0.0.0.0 |
 | Nextcloud + MariaDB | `https://da-hub.taile9dad7.ts.net` | v33.0.8 (33.0.9 verfügbar), MariaDB 11.4.13; Tailscale Funnel → `127.0.0.1:8080`, 2FA; Host-Port `8080` auf 0.0.0.0 |
@@ -56,7 +56,7 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | Docling | `100.93.33.0:5001` | docling-serve v1.32.0; Dokument-Extraktion |
 | Gotenberg | `:3000` | v8.36.0; HTML → PDF; Host-Port auf 0.0.0.0 |
 | LibreOffice unoserver | `100.93.33.0:2004` | Image 3.19 (Neubau 13.09.), LibreOffice 7.6.7.2; REST `POST /request` |
-| Watchtower | – | Fork `nickfedor`, nur Meldung, täglich 08:00 (`containrrr` ist verwaist – nicht verwenden) |
+| Watchtower | – | **Gestoppt seit 28.09.2026** (`restart=no`, Container bleibt stehen). Ersetzt durch `dahub-update.sh` + Wochenbilanz. Rückweg: `docker update --restart=always watchtower && docker start watchtower` |
 | **da-agent** | Telegram `@da_hub_bot` | systemd-Dienst, siehe unten |
 
 Container mit `restart: always`.
@@ -71,7 +71,7 @@ Container mit `restart: always`.
 | `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
 | `~/litellm/` | `litellm` | litellm | `litellm:v1.85.0` | `.env` (600) |
 | `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.8`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
-| Portainer-Stack 4 (Entscheid Phase 3) | `watchover` (Tippfehler, so lassen) | watchtower | ungepinnt | Klartext in der Portainer-Datei |
+| Portainer-Stack 4, **gestoppt 28.09.** | `watchover` (Tippfehler, so lassen) | watchtower | ungepinnt | Klartext in der Portainer-Datei |
 | von Hand (`docker run`) | – | portainer | – | – |
 
 - Portainer-Stacks liegen unter `/var/lib/docker/volumes/portainer_data/_data/compose/<Nr>/docker-compose.yml` (nur mit sudo lesbar). Keiner der Stacks bezieht Variablen aus der Portainer-DB; nur Stack 6 hatte eine `stack.env` (eine Variable)
@@ -270,6 +270,11 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 - `check-container.sh` schweigt seit 28.09., solange das Wartungsflag `~/.local/state/dahub-wartung` besteht; ist es älter als 3 h, meldet es das
 - `nextcloud-cron.timer`: Nextcloud-Hintergrundjobs alle 5 min (`cron.php` im Container), Modus `cron` seit 28.09. (vorher AJAX)
 - `~/stacks/bin/dahub-update.sh` (Phase 2): `--pruefen` zeigt fällige Updates; `--gruppe auto` bzw. `--dienst X [--version V]` aktualisiert mit Tests und Rückfall. Log `~/.local/state/dahub-update.log`. Karenzzeit 7 Tage, Linien in `dienste.conf`. Ollama-Test mit Kosinus-Vergleich zur Referenz `~/stacks/tests/ollama-referenz.json` (≥ 0.999)
+  - Seit 28.09. (Phase 3): `--still` unterdrückt die Meldung bei Erfolg bzw. «nichts fällig» (Fehler werden weiter sofort gemeldet). Jeder `--gruppe`-Lauf schreibt `~/.local/state/dahub-update-ergebnis-<gruppe>` (zeit, epoch, rc, text)
+  - `dienste.conf` hat eine 8. Spalte **meldelinie**: Bei Linie `-` meldet `--pruefen` passende Tags als «nur Meldung», spielt sie aber nie ein. Aufgenommen: `postgres-vector` (`^pg16$`, Test `t_pgvector`) und `portainer` (`^latest$`, Stack `-` = ohne Compose-Datei: Tag aus dem Container, Update wird verweigert, «von Hand»). n8n/LiteLLM meldet weiterhin `check-versionen.py`
+  - `--dienst X --version <gleicher Tag>` zieht einen Neubau desselben Tags (ausser Nextcloud); bei unveränderter Image-ID geschieht nichts
+- **`dahub-update.timer`** (seit 28.09.): sonntags 03:30, `--gruppe auto --still`, `Persistent=true`; der Service wartet vor dem Start, bis der Server 15 min läuft (nachgeholter Lauf nach Neustart), `TimeoutStartSec=3h`
+- **`dahub-wochenbilanz.timer`** (seit 28.09.): montags 08:05, `~/stacks/bin/dahub-wochenbilanz.sh` → eine Meldung: Sonntagslauf (Totmann: fehlt er oder ist er älter als 48 h → Priorität high), Container laufend/ungesund (erwartet = `restart always|unless-stopped`), Indexierung pending/done und neu endgültig gescheitert seit der Vorwoche (Stand in `~/.local/state/dahub-wochenbilanz.stand`, Basis 28.09.: done 111'425, endgültig 1'107), verfügbare Freigabe-Updates. `--anzeigen` = nur ausgeben, nichts senden, nichts merken
 - Wartungsflag `~/.local/state/dahub-wartung` pausiert Worker, Scan und Nextcloud-Cron über feste Drop-ins `dahub-wartung.conf` (`ConditionPathExists=!…`)
 - `~/scripts/check-index-fehler.sh` + `index-fehler.timer`: täglich 08:00, meldet endgültig gescheiterte Indexierungen (siehe Wissensbasis)
 - `check-versionen.py` + `versions-check.timer`: **wöchentlich**, montags 08:15; prüft die gepinnten Images n8n und LiteLLM auf neuere Versionen, mit Wiederholungssperre. Stand 15.09.: n8n 2.37.10 → 2.39.5, LiteLLM 1.85.0 → 1.101.0 verfügbar
@@ -287,9 +292,20 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 - Muster für neue Dienste: eigenes Verzeichnis unter `~/stacks/<name>/` mit `name:` auf oberster Ebene, `restart: always`, nur Tailscale, Secrets in einer eigenen `.env` mit chmod 600, in der Compose-Datei nur `${VAR}`
 - Commits 27.09.2026: `4c2e3a7` gotenberg, `c43d167` ntfy, `ec15767` Verarbeitung (wissensdatenbank), `b166123` n8n (Repo-Stand war vorher veraltet: 1.80.3, ohne Healthcheck). `main` folgt wieder `origin/main` (Upstream war seit dem `filter-repo` vom 15.09. nicht gesetzt)
 - Commit 28.09.2026: `27bd1ff` Nextcloud (Repo-Stand vorher ohne Healthcheck, Tags `:33`/`:11.4`)
-- Nur `compose/watchtower-stack.yml` ist noch nicht gegen die Portainer-Datei abgeglichen
+- Nur `compose/watchtower-stack.yml` ist noch nicht gegen die Portainer-Datei abgeglichen (Watchtower seit 28.09. gestoppt, Datei als stillgelegt markiert)
+- Phase 3 (28.09.): `stacks/bin/dahub-wochenbilanz.sh`, `systemd/dahub-update.*`, `systemd/dahub-wochenbilanz.*`
 
 ---
+
+## Änderungsprotokoll 28.09.2026 (Phase 3: Timer, Wochenbilanz, Watchtower)
+
+1. **Entscheide David:** Montagsbilanz mit Totmann (statt Meldung des Sonntagslaufs), Watchtower stoppen und Container behalten, DNS über `nohook resolv.conf` (Variante a), vor dem ersten Timerlauf ein Handlauf `--gruppe auto`. Ergänzt: Bilanz zusätzlich mit Containern und Indexierung; pgvector und portainer als «freigabe» mit Linie `-` (nur Meldung); `Persistent=true` mit Startverzögerung
+2. **`dahub-update.sh` erweitert** (`--still`, Ergebnisdatei, Meldelinie, Stack `-`, `t_pgvector`, `t_portainer`, postgres-vector pausiert den Worker) und **`dahub-wochenbilanz.sh`** neu; Mocktests (kein Lauf / ok / veraltet / rc=1) grün
+3. **Watchtower gestoppt** (`docker update --restart=no` + `docker stop`), Container und Portainer-Eintrag 4 bleiben
+4. **Erster Handlauf 21:52 abgebrochen**, ohne Eingriff (Flag gesetzt, sofort wieder entfernt, kein Container berührt): Die Prüfung `systemctl cat … | grep -qF` scheiterte unter `pipefail` an SIGPIPE, weil nach dem Treffer noch das alte Laufzeit-Drop-in `pause.conf` ausgegeben wurde – nachgestellt **182 von 200 falsch negativ**. Der gotenberg-Lauf um 21:23 kam nur zufällig durch. Gefährlicher war dieselbe Falle in der Warteschleife auf den Worker: Sie hätte einen laufenden Worker nie als aktiv erkannt (Mock 0/20) und docling mitten im Lauf neu gestartet
+5. **Korrektur:** alle 10 Stellen `… | grep -q` / `… | head` in `dahub-update.sh` und `dahub-wochenbilanz.sh` auf Variable + Here-String bzw. `${var%%$'\n'*}` umgestellt; auf dem Server 200/200 für alle drei Drop-ins, alle 10 Funktionstests grün. Sicherungen: `~/tmp/p3-backup/` (vor Phase 3), `~/tmp/p3-backup2/` (vor der Korrektur)
+6. **David (sudo):** `/run/systemd/system/wissensbasis-worker.service.d/pause.conf` entfernt, vier Units installiert, `daemon-reload`, beide Timer enabled; `NeedDaemonReload=no` geprüft. Erster Timerlauf So 04.10. 03:30, erste Bilanz Mo 05.10. 08:05
+7. **Zweiter Handlauf** seit 22:01:38 (`--gruppe auto`, ohne `--still`, Ergebnis per ntfy): docling v1.32.0 → v1.34.0, libreoffice 3.19 (Neubau). Wartete zum Zeitpunkt der Dokumentation noch auf den Worker-Lauf von 21:26. Auswertung und Commit der Compose-Änderung in der nächsten Sitzung
 
 ## Änderungsprotokoll 28.09.2026 (Phase 1: Nextcloud)
 
@@ -333,11 +349,10 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 
 ## Plan (Stand 28.09.2026)
 
-1. **Nächste Sitzung – Phase 3 minimal + DNS:**
-   - `dahub-update.timer`: sonntags 03:30 (nach der Nachtroutine), `dahub-update.sh --gruppe auto`, als `david`
-   - Wochenbilanz am Montag: eine ntfy-Zeile mit dem Ergebnis des Sonntagslaufs (aktualisiert / zurückgenommen / Fehler)
-   - Watchtower abschalten (Stack 4; Update-Suche übernimmt `dahub-update.sh`, n8n/LiteLLM meldet `check-versionen.py`)
-   - DNS-Behebung (offener Punkt K): `resolv.conf` dauerhaft mit Tailscale-Resolver, danach Rückkehr von `notify.sh` auf den Namen prüfen oder bewusst bei `127.0.0.1` bleiben
+1. **Phase 3 – erledigt am 28.09.:** `dahub-update.timer`, Wochenbilanz, Watchtower gestoppt (siehe Änderungsprotokoll). **Nächste Sitzung:**
+   - Handlauf vom 28.09. 22:01 auswerten: Log (`tail -n +<letzter Start> ~/.local/state/dahub-update.log`), Wartungsflag entfernt, Worker- und Scan-Timer laufen, docling v1.34.0 / libreoffice-Neubau: Image-ID = Tag in der Compose-Datei, Tests grün. Danach Commit (Compose-Datei, falls das Skript ihn nicht selbst gemacht hat)
+   - DNS (Punkt K): zuerst die zwei lesenden sudo-Schritte (Journal 20.09. 15:25–15:40, `NetworkManager --print-config`), dann `nohook resolv.conf` – Ablauf siehe Punkt K
+   - Nach So 04.10. / Mo 05.10.: ersten Timerlauf und erste Wochenbilanz prüfen
 2. **Danach gilt das Aufsetzen als abgeschlossen.** Phase 4 (Freigabe-Knopf im Telegram-Agenten) ist **zurückgestellt**; n8n und LiteLLM bis dahin von Hand mit `dahub-update.sh --dienst … --version …`
 3. **Dann:** Punkt G (steigende Zahl endgültig gescheiterter Indexierungen) und anschliessend die Anwendungen (Roadmap «Agent richtig einsetzen»)
 
@@ -349,13 +364,16 @@ A. ~~Nextcloud-Übernahme (Stack 2)~~ **erledigt 28.09.2026 19:56** (siehe Ände
 B. **LAN-Erreichbarkeit der Ports 5678 (n8n), 8080 (nextcloud), 3000 (gotenberg) und 9092 (ntfy) prüfen.** Alle vier sind auf 0.0.0.0 gebunden; Docker umgeht ufw häufig. Tailscale Serve/Funnel zeigen auf `localhost`/`127.0.0.1`, eine Bindung auf `127.0.0.1` würde genügen
 C. Nextcloud 33.0.9 verfügbar – erster Anwendungsfall für `dahub-update.sh` (Phase 2)
 D. ~~Nextcloud-Hintergrundjobs auf Cron umstellen~~ **erledigt 28.09.2026** (`nextcloud-cron.timer`, Modus `cron`, siehe Änderungsprotokoll)
-E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen
+E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen. Seit 28.09. zusätzlich: gestoppter Container `watchtower` + Image `nickfedor/watchtower`, sobald feststeht, dass er nicht mehr gebraucht wird
 F. Portainer-Einträge 1, 2, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
 G. **Endgültig gescheiterte Indexierungen steigen stark:** laut täglicher Fehlermeldung **587 (20.09.) → 1'106 (28.09.) in 8 Tagen**, rund 65 pro Tag (`file_jobs.failed` 597 am 15.09., 1'072 am 27.09.). Blieb unbemerkt, weil die Meldungen seit 21.09. nicht zugestellt wurden (Punkt K). Die «neu»-Zahl der Meldung summiert sich seither auf (523 am 28.09.), weil die IDs nur nach erfolgreichem Versand gemerkt werden. Ursache (Fehlertypen) vordringlich untersuchen; mit dem Rückholen (Punkt 1) zusammen anschauen
 H. Viele alte Nextcloud-Sitzungen/App-Passwörter (Desktop-Clients, Browser, «n8n» vom 24.08.) aufräumen
 I. **MariaDB-Root-Passwort klären:** `MYSQL_ROOT_PASSWORD` (32 Zeichen) wird für `root@localhost` abgewiesen. Klären, welches Passwort gilt bzw. ob Root per Socket/ohne Passwort eingerichtet ist; danach Variable und DB in Einklang bringen (`~/stacks/nextcloude/.env`). Dumps laufen bis dahin über den App-Benutzer
 J. **`MARIADB_AUTO_UPGRADE` prüfen** (Review 28.09. zu `dahub-update.sh`, nur notiert): Ohne diese Variable führt das MariaDB-Image nach einem Versionssprung `mariadb-upgrade` nicht selbst aus. Für Patches innerhalb 11.4.x meist unkritisch; vor einem Wechsel der Linie (z. B. 11.8) klären, ob die Variable gesetzt oder `mariadb-upgrade` im Skript aufgerufen wird. Hängt mit Punkt I zusammen (Root-Zugang)
 K. **DNS des Servers: `dhcpcd` überschreibt `/etc/resolv.conf`** (Umsetzung in eigener Sitzung, sudo). Seit **20.09. 15:35** steht dort «Generated by dhcpcd from eno2.dhcp, eno2.dhcp6, eno2.ra» mit Router und Provider-DNS, ohne Tailscale-Resolver `100.100.100.100`. Folge: Der Server löst `da-hub.taile9dad7.ts.net` öffentlich auf (Funnel-IPv6 `2a00:dd80:20::…`), Port 10000/8443 sind dort nicht erreichbar → **alle ntfy-Meldungen vom 21.09. bis 28.09. gescheitert (13, HTTP 000)**, darunter eine Störungsmeldung. Behelf seit 28.09.: `notify.sh` sendet direkt an `http://127.0.0.1:9092`. Befund (nur lesend): `eno2` per ifupdown mit `dhcpcd` (Debian 13), Tailscale verwaltet DNS direkt über `resolv.conf` (kein `systemd-resolved`), MagicDNS selbst funktioniert (`dig @100.100.100.100` → `100.93.33.0`), **NetworkManager und ifupdown sind beide aktiv**. Tritt bei jeder Lease-Erneuerung wieder auf; ein Tailscale-Neustart repariert nur vorübergehend. Optionen: (a) `nohook resolv.conf` in `/etc/dhcpcd.conf`, (b) `systemd-resolved` einführen (Tailscale integriert sich dort sauber), (c) nur `/etc/hosts`-Eintrag für den eigenen Namen. Vorher mit sudo den Auslöser prüfen: `sudo journalctl --since '2026-09-20 15:30' --until '2026-09-20 15:40'`. `david` ist nicht in `adm`/`systemd-journal` und sieht das Systemjournal nicht
+   - **Messung 28.09. (lesend):** dhcpcd 10.1.0 (Paket `dhcpcd-base`, von ifupdown für `eno2` gestartet, läuft seit dem Boot 09.09.) schreibt über den Hook `20-resolv.conf` (kein `resolvconf` installiert). Tailscale hat am 20.09. um **15:32** neu geschrieben (`/etc/resolv.pre-tailscale-backup.conf`), dhcpcd um **15:35** überschrieben. NetworkManager: `eno2` unmanaged (`[ifupdown] managed=false`), keine `/run/NetworkManager/resolv.conf` → schreibt nicht; effektive `dns=`-Einstellung noch mit sudo prüfen. `tailscale dns status`: Tailscale-DNS aktiv, Resolver Quad9, Split-DNS `ts.net`
+   - **Entscheid 28.09.: Variante (a).** Ablauf (sudo, einzeln): `/etc/dhcpcd.conf` sichern → `nohook resolv.conf` anhängen → `dhcpcd -n eno2` (Konfiguration neu laden) → `tailscale set --accept-dns=false`, dann `=true` (Tailscale schreibt `resolv.conf` neu). Tests: `da-hub.taile9dad7.ts.net` → `100.93.33.0`, `api.anthropic.com` auflösbar. Danach Lease-Erneuerung (`dhcpcd -n eno2`) und prüfen, dass `resolv.conf` unverändert bleibt (sha256 vorher/nachher). Rückweg: Zeile entfernen, `dhcpcd -n eno2`. `notify.sh` bleibt bei `127.0.0.1`
+M. **Portainer:** Neubau von `portainer/portainer-ce:latest` verfügbar (11,8 Tage alt, 28.09.). Nur bei Sicherheitslücken, von Hand (kein Compose; siehe Punkt 12 «Bisherige»)
 L. **Repo-Stände der Skripte gegen den Server abgleichen:** `check-container.sh` und `notify.sh` lagen im Repo noch in der Fassung vor dem 09.09. (am 28.09. nachgeführt). Übrige Skripte in `scripts/` und Units in `systemd/` einmal mit `diff` gegen den Server prüfen
 
 ### Bisherige
@@ -441,6 +459,8 @@ Leitplanke: Nichts verlässt den Server ohne Bestätigung per Button.
 - **Stack 6 und alle Verarbeitungsdienste binden nur auf `100.93.33.0`** – Tests dort gegen die Tailscale-IP, nicht gegen `127.0.0.1`
 - **Unter Git Bash auf Windows zählt `grep -c $'\r'` falsch** – CRLF mit `file` oder einem Byte-Vergleich (`wc -c` gegen `tr -d '\r' | wc -c`) prüfen
 - **`echo … | grep -q` mit `pipefail`** kann einen Treffer verschlucken (SIGPIPE) – in Skripten `grep -q … <<<"$var"` verwenden
+- **Nachtrag 28.09.:** Das gilt für **jeden** Empfänger, der die Pipe früh schliesst (`grep -q`, `head`, `sed …q`, `awk … exit`) und jeden Sender, der danach noch schreibt (`systemctl cat/show`, `docker`, `occ`). `systemctl cat | grep -q` war in 182 von 200 Fällen falsch. Bei Reviews gezielt nach `| grep -q` und `| head` suchen; erste Zeile per `${var%%$'\n'*}`
+- **Container-Logs** (libreoffice, docling, Worker) enthalten Dateinamen aus KGAG-Mails (Personen, Firmen) – nie ungefiltert ausgeben, nur Status-/Fehlerzeilen
 
 ---
 
