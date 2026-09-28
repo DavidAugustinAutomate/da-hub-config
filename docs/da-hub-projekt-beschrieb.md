@@ -1,6 +1,6 @@
 # Projekt-Beschrieb: Automatisierungshub «da-hub»
 
-*Kontextdokument für künftige Chats. Stand: 27.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
+*Kontextdokument für künftige Chats. Stand: 28.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
 *Punkte mit «(unbestätigt)» stammen aus älteren Sessions und wurden seither nicht erneut geprüft.*
 
 ---
@@ -46,7 +46,7 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | Dienst | Adresse | Bemerkung |
 |---|---|---|
 | Cockpit | `https://100.93.33.0:9090` | Server-Verwaltung |
-| Portainer | `https://100.93.33.0:9443` | Nur noch Anzeige; Stacks 1, 3, 5, 6 sind nach `~/stacks/` übernommen (Einträge stehen noch, **nicht mehr darüber deployen**). Container selbst von Hand gestartet |
+| Portainer | `https://100.93.33.0:9443` | Nur noch Anzeige; Stacks 1, 2, 3, 5, 6 sind nach `~/stacks/` übernommen (nur Stack 4 Watchtower noch nicht) (Einträge stehen noch, **nicht mehr darüber deployen**). Container selbst von Hand gestartet |
 | LiteLLM-Gateway | `http://100.93.33.0:4000` | v1.85.0 gepinnt, ohne Datenbank; Compose in `~/litellm/` |
 | n8n | `https://da-hub.taile9dad7.ts.net:8443` | v2.37.10, Tailscale Serve → `localhost:5678`; Host-Port `5678` auf 0.0.0.0 |
 | Nextcloud + MariaDB | `https://da-hub.taile9dad7.ts.net` | v33.0.8 (33.0.9 verfügbar), MariaDB 11.4.13; Tailscale Funnel → `127.0.0.1:8080`, 2FA; Host-Port `8080` auf 0.0.0.0 |
@@ -70,14 +70,15 @@ Container mit `restart: always`.
 | `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.32.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
 | `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
 | `~/litellm/` | `litellm` | litellm | `litellm:v1.85.0` | `.env` (600) |
-| Portainer-Stack 2 (**noch nicht übernommen**) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33`, `mariadb:11.4` (Tags zeigen lokal schon auf neuere Images) | Klartext in der Portainer-Datei |
+| `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.8`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
 | Portainer-Stack 4 (Entscheid Phase 3) | `watchover` (Tippfehler, so lassen) | watchtower | ungepinnt | Klartext in der Portainer-Datei |
 | von Hand (`docker run`) | – | portainer | – | – |
 
 - Portainer-Stacks liegen unter `/var/lib/docker/volumes/portainer_data/_data/compose/<Nr>/docker-compose.yml` (nur mit sudo lesbar). Keiner der Stacks bezieht Variablen aus der Portainer-DB; nur Stack 6 hatte eine `stack.env` (eine Variable)
 - Die Compose-Dateien in `~/stacks/` sind identisch mit `compose/*-stack.yml` im Repo (Werte nur als `${VAR}`)
 - Container, die nicht neu erstellt wurden, tragen im Label `working_dir` noch den alten Pfad (postgres-vector); das korrigiert sich beim nächsten Update
-- Rückfall-Image: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau)
+- Rückfall-Images: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau), `dahub-rueckfall/mariadb:11.4.13-vor-uebernahme` (MariaDB vor dem Neubau desselben Tags)
+- Nextcloud-Sicherungen: `~/backup/` (700); Dump vor der Übernahme `nextcloud-20260928-1956.sql` + `.version.php`, Test-Dump `nextcloud-test-20260928-1846.sql` (je 132 MB, 600). Dump über den App-Benutzer: `mariadb-dump --single-transaction --no-tablespaces --quick` (3 s, 134 Tabellen, alle InnoDB)
 - Testdatei für Funktionstests: `~/stacks/tests/test.pdf` (von Gotenberg erzeugt, enthält das Merkwort `Dahubtest4711`)
 
 **Healthchecks** haben nur n8n (`wget …/healthz`, 60 s), Watchtower und Nextcloud. Es fehlen: litellm, postgres-vector, docling, ollama, libreoffice, nextcloud-db, portainer, ntfy, gotenberg. `check-container.sh` prüft ersatzweise Status und Port-Erreichbarkeit von aussen.
@@ -281,7 +282,17 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 - **Nicht im Repo:** der von Hand gestartete Portainer-Container
 - Muster für neue Dienste: eigenes Verzeichnis unter `~/stacks/<name>/` mit `name:` auf oberster Ebene, `restart: always`, nur Tailscale, Secrets in einer eigenen `.env` mit chmod 600, in der Compose-Datei nur `${VAR}`
 - Commits 27.09.2026: `4c2e3a7` gotenberg, `c43d167` ntfy, `ec15767` Verarbeitung (wissensdatenbank), `b166123` n8n (Repo-Stand war vorher veraltet: 1.80.3, ohne Healthcheck). `main` folgt wieder `origin/main` (Upstream war seit dem `filter-repo` vom 15.09. nicht gesetzt)
-- `compose/nextcloud-stack.yml` (15.09.) und `compose/watchtower-stack.yml` sind noch nicht gegen die Portainer-Dateien abgeglichen
+- Commit 28.09.2026: `27bd1ff` Nextcloud (Repo-Stand vorher ohne Healthcheck, Tags `:33`/`:11.4`)
+- Nur `compose/watchtower-stack.yml` ist noch nicht gegen die Portainer-Datei abgeglichen
+
+---
+
+## Änderungsprotokoll 28.09.2026 (Phase 1: Nextcloud)
+
+1. **Test-Dump** über den App-Benutzer `nextcloud` (hat `ALL PRIVILEGES` auf der DB `nextcloud`): 134 Tabellen, alle InnoDB, DB 716 MB, Dump 132 MB in 3 s
+2. **Nextcloud übernommen** nach `~/stacks/nextcloude/` bei pausiertem Worker (Flag) und gestopptem Scan-Timer: `.env` per `stack-env-schreiben.py` aus der Portainer-Datei (10 Variablen, gemeinsame Namen in beiden Diensten mit gleichem Wert), Compose-Datei auf Basis der Portainer-Datei (Repo fehlte der Healthcheck), Config-Hash beider Dienste mit den bisherigen Tags identisch, Variablen pro Dienst unter `environment` als `${VAR}` (kein `env_file`). Gepinnt: `nextcloud:33.0.8` (= bisher laufend), `mariadb:11.4.13` (Neubau derselben Version, altes Image als Rückfall-Tag). Wartungsmodus an → Dump `nextcloud-20260928-1956.sql` + `version.php` → Neuerstellung beider Container → Wartungsmodus aus. Tests vorher und nachher grün: `occ status` (33.0.8, kein DB-Upgrade), WebDAV als `wissensbasis-bot` (207, gleiche Zugangsdaten wie der Scanner), Funnel `status.php`, App-Passwörter unverändert (22, inkl. `n8n-2026-09`), healthy. Commit `27bd1ff`
+3. **Schlafende Laufzeit-Maske** `/run/systemd/system/wissensbasis-worker.service -> /dev/null` (seit 27.09. 20:31, von einem zweiten `mask --runtime`) gefunden und entfernt – sie wäre beim nächsten `daemon-reload` wirksam geworden. `pause.conf` war entgegen dem Anschein nie gelöscht (Verzeichnis-mtime unverändert)
+4. Damit ist **Phase 1 abgeschlossen** bis auf Watchtower (Entscheid Phase 3)
 
 ---
 
@@ -316,22 +327,15 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 
 ### Aus Phase 1 (27.09.2026)
 
-A. **Nextcloud-Übernahme (Stack 2)** in eigener Sitzung. Messstand:
-   - `occ status` am 27.09.2026 21:09: `versionstring` 33.0.8, `maintenance` false, **`needsDbUpgrade` false**
-   - `nextcloud:33.0.8` = laufendes Image ✓; `mariadb:11.4.13` ≠ laufendes Image (Tag neu gebaut) → Rückfall-Tag + Neubau oder lokaler Tag, entscheiden
-   - Beide Container werden wegen des Portainer-Labels sicher neu erstellt, auch die MariaDB
-   - **`MYSQL_ROOT_PASSWORD` (32 Zeichen) wird von MariaDB für `root@localhost` abgewiesen** – Root-Passwort in der DB weicht von der Variable ab. Dump deshalb mit dem App-Benutzer (`--single-transaction --no-tablespaces`), vorher testen. Root-Zugang klären
-   - Datenverzeichnis 3,8 GB; `~/backup/` existiert noch nicht; 611 GB frei
-   - Worker vorher pausieren (Nextcloud ist Quelle für Scan/Worker); danach App-Passwörter prüfen: «da-agent» (david), «n8n-neu» (wissensbasis-bot, aktiv), «n8n-2026-09» (david)
-   - Repo-Datei vom 15.09. nicht gegen die Portainer-Datei abgeglichen → wie bei n8n die Portainer-Datei als Basis nehmen
+A. ~~Nextcloud-Übernahme (Stack 2)~~ **erledigt 28.09.2026 19:56** (siehe Änderungsprotokoll 28.09.). Offen daraus nur noch: n8n-Credential «NextCloud account» einmal von Hand mit «Test» prüfen; Funnel einmal von aussen (Mobilnetz) aufrufen
 B. **LAN-Erreichbarkeit der Ports 5678 (n8n), 8080 (nextcloud), 3000 (gotenberg) und 9092 (ntfy) prüfen.** Alle vier sind auf 0.0.0.0 gebunden; Docker umgeht ufw häufig. Tailscale Serve/Funnel zeigen auf `localhost`/`127.0.0.1`, eine Bindung auf `127.0.0.1` würde genügen
 C. Nextcloud 33.0.9 verfügbar – erster Anwendungsfall für `dahub-update.sh` (Phase 2)
-D. **Nextcloud-Hintergrundjobs von AJAX auf Cron per systemd-Timer umstellen** (in der Nextcloud-Sitzung). Heute Modus «AJAX», letzter Lauf 26.09. 12:25 – Jobs laufen nur, wenn jemand die Weboberfläche öffnet
+D. **Nextcloud-Hintergrundjobs von AJAX auf Cron per systemd-Timer umstellen** (bei der Übernahme am 28.09. bewusst noch nicht gemacht; eigener Schritt). Heute Modus «AJAX», letzter Lauf 26.09. 12:25 – Jobs laufen nur, wenn jemand die Weboberfläche öffnet
 E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen
-F. Portainer-Einträge 1, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
+F. Portainer-Einträge 1, 2, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
 G. `failed` in `file_jobs` von 597 (15.09.) auf 1'072 gestiegen – mit dem Rückholen (Punkt 1) zusammen anschauen
 H. Viele alte Nextcloud-Sitzungen/App-Passwörter (Desktop-Clients, Browser, «n8n» vom 24.08.) aufräumen
-I. **MariaDB-Root-Passwort klären:** `MYSQL_ROOT_PASSWORD` (32 Zeichen) wird für `root@localhost` abgewiesen. Klären, welches Passwort gilt bzw. ob Root per Socket/ohne Passwort eingerichtet ist; danach Variable und DB in Einklang bringen und in der `.env` des künftigen Stacks ablegen
+I. **MariaDB-Root-Passwort klären:** `MYSQL_ROOT_PASSWORD` (32 Zeichen) wird für `root@localhost` abgewiesen. Klären, welches Passwort gilt bzw. ob Root per Socket/ohne Passwort eingerichtet ist; danach Variable und DB in Einklang bringen (`~/stacks/nextcloude/.env`). Dumps laufen bis dahin über den App-Benutzer
 
 ### Bisherige
 
