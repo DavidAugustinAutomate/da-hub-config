@@ -2,7 +2,7 @@ name: gotenberg
 
 services:
   gotenberg:
-    image: gotenberg/gotenberg:8.36.0
+    image: gotenberg/gotenberg:8.37.0
     container_name: gotenberg
     restart: always
     ports:
