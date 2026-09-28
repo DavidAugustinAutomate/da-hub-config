@@ -1,0 +1,13 @@
+[Unit]
+Description=Nextcloud Hintergrundjobs (cron.php im Container nextcloud)
+Requires=docker.service
+After=docker.service
+# Waehrend Wartung/Update (dahub-update.sh) nicht laufen
+ConditionPathExists=!/home/david/.local/state/dahub-wartung
+
+[Service]
+Type=oneshot
+User=david
+ExecStart=/usr/bin/docker exec -u www-data nextcloud php -f /var/www/html/cron.php
+TimeoutStartSec=15min
+Nice=10
