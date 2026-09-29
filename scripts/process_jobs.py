@@ -386,6 +386,37 @@ def convert_legacy(unoserver_url, filename, content):
     return basis + "." + ziel_format, resp.content
 
 
+JFIF_ERSATZ_DPI = 96
+
+
+def jfif_dichte_korrigieren(content):
+    """JPEG mit JFIF-Dichte 0 (x und/oder y) lehnt docling mit 'Could not load
+    image' ab, obwohl das Bild einwandfrei ist (29.09.: 585 Mail-Anhaenge;
+    Gegenprobe 10/10 OK mit 96 dpi). Setzt nur die betroffenen Dichte-Bytes im
+    APP0-JFIF-Segment; alles andere bleibt Byte fuer Byte gleich.
+    Gibt (inhalt, korrigiert) zurueck."""
+    if content[:2] != b"\xff\xd8":
+        return content, False
+    i = 2
+    while i + 4 <= len(content) and content[i] == 0xFF:
+        marker = content[i + 1]
+        if marker == 0xDA:  # Start of Scan: keine Kopfsegmente mehr
+            break
+        laenge = int.from_bytes(content[i + 2:i + 4], "big")
+        if marker == 0xE0 and content[i + 4:i + 9] == b"JFIF\x00" and laenge >= 16:
+            p = i + 12  # Einheit bei i+11, x-Dichte i+12..13, y-Dichte i+14..15
+            x = int.from_bytes(content[p:p + 2], "big")
+            y = int.from_bytes(content[p + 2:p + 4], "big")
+            if x and y:
+                return content, False
+            neu_x = x or y or JFIF_ERSATZ_DPI
+            neu_y = y or x or JFIF_ERSATZ_DPI
+            return (content[:p] + neu_x.to_bytes(2, "big") + neu_y.to_bytes(2, "big")
+                    + content[p + 4:]), True
+        i += 2 + laenge
+    return content, False
+
+
 def extract_text(docling_url, unoserver_url, filename, content):
     """Schickt die Datei an Docling und gibt den extrahierten Markdown-Text zurück.
     Ausnahmen: .msg (Outlook) läuft über extract-msg, alte Office-Binärformate
@@ -595,7 +626,9 @@ def process_one(job, session, args, pg_conn, simulieren=False):
         raise RuntimeError(f"Datei zu gross ({len(content) // 1024 // 1024} MB, Limit {MAX_FILE_SIZE // 1024 // 1024} MB)")
     heartbeat(pg_conn, job_id)  # Download geschafft
 
-    content_hash = hashlib.sha256(content).hexdigest()
+    content_hash = hashlib.sha256(content).hexdigest()  # immer vom Original
+    content, dichte_korrigiert = jfif_dichte_korrigieren(content)
+    hinweis = " (JFIF-Dichte korrigiert)" if dichte_korrigiert else ""
     text = extract_text(args.docling_url, args.unoserver_url, filename, content)
     heartbeat(pg_conn, job_id)  # Textextraktion geschafft (kann bis 10 Min dauern)
 
@@ -605,7 +638,7 @@ def process_one(job, session, args, pg_conn, simulieren=False):
         # Kein verwertbarer Text (leere Datei, reines Bild ohne erkennbaren Text)
         if not simulieren:
             store_document(pg_conn, job_id, path, filename, content_hash, [], [])
-        return "kein Text extrahierbar (0 Chunks)"
+        return "kein Text extrahierbar (0 Chunks)" + hinweis
 
     embeddings = []
     batch = 32  # mehr Chunks pro Ollama-Aufruf wären speicherhungrig
@@ -615,7 +648,7 @@ def process_one(job, session, args, pg_conn, simulieren=False):
 
     if not simulieren:
         store_document(pg_conn, job_id, path, filename, content_hash, chunks, embeddings)
-    return f"{len(chunks)} Chunks, {len(text)} Zeichen"
+    return f"{len(chunks)} Chunks, {len(text)} Zeichen{hinweis}"
 
 
 def recover_stale_jobs(pg_conn, stale_minutes=60, max_attempts=3):

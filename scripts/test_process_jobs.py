@@ -161,5 +161,57 @@ class Stufe1Gesundheit(unittest.TestCase):
         self.assertNotIn("Müller", t)
 
 
+def jpeg(x, y, exif_zuerst=False):
+    app0 = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x01" + x.to_bytes(2, "big") + y.to_bytes(2, "big") + b"\x00\x00"
+    app14 = b"\xff\xee\x00\x0eAdobe\x00d\x00\x00\x00\x00\x01"
+    exif = b"\xff\xe1\x00\x08Exif\x00\x00"
+    rest = b"\xff\xdb\x00\x04\x00\x00\xff\xda\x00\x02" + b"\x12\x34" * 50 + b"\xff\xd9"
+    return b"\xff\xd8" + ((exif + app0) if exif_zuerst else app0) + app14 + rest
+
+
+class Stufe2Jpeg(unittest.TestCase):
+    def test_dichte_null_korrigiert(self):
+        alt = jpeg(0, 0)
+        neu, k = pj.jfif_dichte_korrigieren(alt)
+        self.assertTrue(k)
+        self.assertEqual(len(neu), len(alt))
+        self.assertEqual(neu[14:18], (96).to_bytes(2, "big") * 2)
+        diff = [i for i in range(len(alt)) if alt[i] != neu[i]]
+        self.assertTrue(all(14 <= i < 18 for i in diff))  # nur die 4 Dichte-Bytes
+
+    def test_eine_dichte_null(self):
+        neu, k = pj.jfif_dichte_korrigieren(jpeg(72, 0))
+        self.assertTrue(k)
+        self.assertEqual(neu[14:18], (72).to_bytes(2, "big") * 2)
+
+    def test_dichte_gesetzt_unveraendert(self):
+        alt = jpeg(72, 72)
+        self.assertEqual(pj.jfif_dichte_korrigieren(alt), (alt, False))
+
+    def test_jfif_nach_exif(self):
+        neu, k = pj.jfif_dichte_korrigieren(jpeg(0, 0, exif_zuerst=True))
+        self.assertTrue(k)
+
+    def test_kein_jpeg_unveraendert(self):
+        for b in (b"%PDF-1.4 ...", b"\x89PNG\r\n\x1a\n....", b"", b"\xff\xd8"):
+            self.assertEqual(pj.jfif_dichte_korrigieren(b), (b, False))
+
+    def test_process_one_hash_vom_original(self):
+        alt = jpeg(0, 0)
+        sess = mock.Mock(); sess.get.return_value = mock.Mock(status_code=200, content=alt)
+        gesendet = {}
+        def extract(d, u, name, inhalt):
+            gesendet["inhalt"] = inhalt
+            return "Text " * 20
+        with mock.patch.object(pj, "extract_text", side_effect=extract), \
+             mock.patch.object(pj, "embed_batch", side_effect=lambda u, t: [[0.0] * 1024] * len(t)), \
+             mock.patch.object(pj, "store_document") as store:
+            info = pj.process_one({"id": 1, "origin_path": "/a.jpg", "action": "created", "old_path": None},
+                                  sess, args(), mock.MagicMock())
+        self.assertIn("JFIF-Dichte korrigiert", info)
+        self.assertNotEqual(gesendet["inhalt"], alt)
+        self.assertEqual(store.call_args.args[4], pj.hashlib.sha256(alt).hexdigest())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
