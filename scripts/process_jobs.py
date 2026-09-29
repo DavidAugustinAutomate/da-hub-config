@@ -22,6 +22,16 @@ Aufruf:
 
 --limit begrenzt die Anzahl Jobs pro Lauf (Standard 50). Ohne Limit läuft
 das Skript, bis die Queue leer ist.
+
+Gesundheitsprüfung (seit 29.09.2026): Vor jeder Runde werden docling, Ollama
+und Nextcloud geprüft, zu Beginn zusätzlich eine kleine docling-Umwandlung mit
+denselben Feldern wie im Betrieb. Ist ein Dienst nicht erreichbar, endet der
+Lauf, ohne weitere Jobs zu übernehmen. Wird eine Verbindung mitten im Lauf
+abgewiesen, geht der Job ohne Versuchszählung zurück in die Queue.
+
+--simulieren --job-ids 1,2,3 verarbeitet die genannten Jobs vollständig
+(Download, Umwandlung, Chunking, Embedding), speichert aber nichts und ändert
+keinen Job-Status. Ausgabe nur mit ID und Endung, ohne Dateinamen.
 """
 
 import argparse
@@ -56,6 +66,106 @@ EMBEDDING_DIM = 1024
 # sehr lange rechnen und die Queue blockieren.
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
 
+# Gesundheitsprüfung: kurze Frist, sie läuft vor jeder Runde
+GESUNDHEIT_TIMEOUT = 10
+# Funktionsprobe zu Beginn des Laufs: gleiche Felder wie extract_text. Ein
+# reiner /health-Test hätte docling v1.34.0 (29.09.) nicht erkannt.
+DOCLING_FELDER = {"to_formats": "md", "do_ocr": "true", "ocr_lang": "deu,eng"}
+PROBE_MERKWORT = "Dahubprobe4711"
+
+
+class DienstNichtErreichbar(Exception):
+    """Ein benötigter Dienst hat die Verbindung abgewiesen oder ist im
+    Wartungsmodus. Die Datei ist daran nicht schuld: Der Job geht ohne
+    Versuchszählung zurück in die Queue, und der Lauf endet."""
+
+
+def ist_verbindung_abgewiesen(exc):
+    """True, wenn die Verbindung gar nicht zustande kam (Dienst weg).
+    Bricht sie dagegen MITTEN in der Anfrage ab, kann die Datei den Dienst
+    zum Absturz gebracht haben -- dann zählt der Versuch weiter, sonst liefe
+    eine solche Datei endlos in Wiederholung."""
+    if isinstance(exc, requests.ConnectTimeout):
+        return True
+    if not isinstance(exc, requests.ConnectionError):
+        return False
+    text = str(exc)
+    return any(s in text for s in ("Connection refused", "NewConnectionError",
+                                   "Failed to establish a new connection",
+                                   "Name or service not known",
+                                   "Temporary failure in name resolution"))
+
+
+def http(dienst, methode, url, **kwargs):
+    """requests-Aufruf, der eine abgewiesene Verbindung als
+    DienstNichtErreichbar meldet. Alle übrigen Fehler bleiben unverändert."""
+    try:
+        return requests.request(methode, url, **kwargs)
+    except requests.RequestException as exc:
+        if ist_verbindung_abgewiesen(exc):
+            raise DienstNichtErreichbar(f"{dienst} nicht erreichbar: {type(exc).__name__}") from exc
+        raise
+
+
+def dienste_pruefen(args):
+    """Liste der Probleme; leer = alle Dienste bereit."""
+    probleme = []
+    for name, url in (("docling", urljoin(args.docling_url, "/health")),
+                      ("ollama", urljoin(args.ollama_url, "/api/version")),
+                      ("nextcloud", urljoin(args.nextcloud_url, "/status.php"))):
+        try:
+            r = requests.get(url, timeout=GESUNDHEIT_TIMEOUT)
+        except requests.RequestException as exc:
+            probleme.append(f"{name} nicht erreichbar ({type(exc).__name__})")
+            continue
+        if r.status_code != 200:
+            probleme.append(f"{name} HTTP {r.status_code}")
+            continue
+        if name == "nextcloud":
+            try:
+                d = r.json()
+            except ValueError:
+                probleme.append("nextcloud: status.php ohne JSON")
+                continue
+            if d.get("maintenance") or not d.get("installed"):
+                probleme.append("nextcloud im Wartungsmodus")
+    return probleme
+
+
+def docling_probe(args):
+    """Kleine Umwandlung mit den Betriebsfeldern. None = in Ordnung, sonst Grund."""
+    try:
+        r = requests.post(urljoin(args.docling_url, "/v1/convert/file"),
+                          files={"files": ("probe.md", f"# Probe\n\n{PROBE_MERKWORT}\n".encode())},
+                          data=DOCLING_FELDER, timeout=120)
+    except requests.RequestException as exc:
+        return f"docling-Probe: {type(exc).__name__}"
+    if r.status_code != 200:
+        return f"docling-Probe: HTTP {r.status_code} {r.text[:120]}"
+    try:
+        d = r.json()
+    except ValueError:
+        return "docling-Probe: Antwort ohne JSON"
+    md = (d.get("document") or {}).get("md_content") or ""
+    if d.get("status") not in ("success", "partial_success") or PROBE_MERKWORT not in md:
+        return f"docling-Probe: status {d.get('status')}, Merkwort {'ja' if PROBE_MERKWORT in md else 'nein'}"
+    return None
+
+
+def job_zurueckgeben(pg_conn, job_id, grund):
+    """Gibt einen Job OHNE Versuchszählung zurück in die Queue (attempts wurde
+    beim Claim erhöht und wird hier wieder abgezogen)."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """UPDATE file_jobs
+               SET status = 'pending', attempts = GREATEST(attempts - 1, 0),
+                   last_error = %s,
+                   processing_started_at = NULL, processing_heartbeat_at = NULL
+               WHERE id = %s AND status = 'processing'""",
+            (grund[:500], job_id),
+        )
+    pg_conn.commit()
+
 
 def assert_job_still_valid(cur, job_id):
     """Prüft INNERHALB der laufenden Transaktion, ob der Job noch gültig ist.
@@ -84,6 +194,8 @@ def heartbeat(pg_conn, job_id):
 
     Fehler hier dürfen die Verarbeitung nie abbrechen -- der Heartbeat ist
     eine Zusatzsicherung, kein kritischer Pfad."""
+    if pg_conn is None:  # --simulieren
+        return
     try:
         with pg_conn.cursor() as cur:
             cur.execute(
@@ -152,7 +264,14 @@ def download_file(session, nextcloud_url, origin_path):
     Scanner in file_tracking geschrieben hat."""
     from urllib.parse import quote
     url = urljoin(nextcloud_url, quote(origin_path, safe="/"))
-    resp = session.get(url, timeout=120)
+    try:
+        resp = session.get(url, timeout=120)
+    except requests.RequestException as exc:
+        if ist_verbindung_abgewiesen(exc):
+            raise DienstNichtErreichbar(f"nextcloud nicht erreichbar: {type(exc).__name__}") from exc
+        raise
+    if resp.status_code == 503:  # Wartungsmodus – nicht die Schuld der Datei
+        raise DienstNichtErreichbar("nextcloud HTTP 503 (Wartungsmodus?)")
     if resp.status_code != 200:
         raise RuntimeError(f"Download fehlgeschlagen ({resp.status_code}) für {origin_path}")
     return resp.content
@@ -237,7 +356,7 @@ def convert_legacy(unoserver_url, filename, content):
         return filename, content
 
     try:
-        resp = requests.post(
+        resp = http("libreoffice", "POST",
             urljoin(unoserver_url, "/request"),
             files={"file": (filename, content)},
             data={"convert-to": ziel_format},
@@ -277,10 +396,9 @@ def extract_text(docling_url, unoserver_url, filename, content):
     filename, content = convert_legacy(unoserver_url, filename, content)
 
     files = {"files": (filename, content)}
-    data = {"to_formats": "md", "do_ocr": "true", "ocr_lang": "deu,eng"}
-    resp = requests.post(
+    resp = http("docling", "POST",
         urljoin(docling_url, "/v1/convert/file"),
-        files=files, data=data, timeout=600,
+        files=files, data=DOCLING_FELDER, timeout=600,
     )
     if resp.status_code != 200:
         raise RuntimeError(f"Docling-Fehler ({resp.status_code}): {resp.text[:300]}")
@@ -325,7 +443,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
 def embed_batch(ollama_url, texts, model="bge-m3"):
     """Erzeugt Embeddings für mehrere Chunks in einem Aufruf."""
-    resp = requests.post(
+    resp = http("ollama", "POST",
         urljoin(ollama_url, "/api/embed"),
         json={"model": model, "input": texts},
         timeout=300,
@@ -449,11 +567,16 @@ def handle_move(pg_conn, job_id, new_path, old_path):
     return moved
 
 
-def process_one(job, session, args, pg_conn):
+def process_one(job, session, args, pg_conn, simulieren=False):
+    """simulieren=True: alles bis und mit Embedding, aber nichts speichern
+    (pg_conn ist dann None, auch kein Heartbeat)."""
     action = job["action"]
     path = job["origin_path"]
     job_id = job["id"]
     filename = path.rstrip("/").split("/")[-1]
+
+    if simulieren and action in ("deleted", "moved"):
+        return f"Simulation: Aktion '{action}' uebersprungen (nur Datenbank)"
 
     if action == "deleted":
         removed = handle_delete(pg_conn, job_id, path)
@@ -480,7 +603,8 @@ def process_one(job, session, args, pg_conn):
 
     if not chunks:
         # Kein verwertbarer Text (leere Datei, reines Bild ohne erkennbaren Text)
-        store_document(pg_conn, job_id, path, filename, content_hash, [], [])
+        if not simulieren:
+            store_document(pg_conn, job_id, path, filename, content_hash, [], [])
         return "kein Text extrahierbar (0 Chunks)"
 
     embeddings = []
@@ -489,7 +613,8 @@ def process_one(job, session, args, pg_conn):
         embeddings.extend(embed_batch(args.ollama_url, chunks[i:i + batch]))
         heartbeat(pg_conn, job_id)  # bei vielen Chunks laufen hier viele Runden
 
-    store_document(pg_conn, job_id, path, filename, content_hash, chunks, embeddings)
+    if not simulieren:
+        store_document(pg_conn, job_id, path, filename, content_hash, chunks, embeddings)
     return f"{len(chunks)} Chunks, {len(text)} Zeichen"
 
 
@@ -544,10 +669,11 @@ def recover_stale_jobs(pg_conn, stale_minutes=60, max_attempts=3):
     return stale, retried, aufgegeben
 
 
-def verarbeite_job_isoliert(job, args, pg_params, zaehler, lock):
+def verarbeite_job_isoliert(job, args, pg_params, zaehler, lock, stopp=None):
     """Läuft in einem eigenen Thread. Wichtig: eigene DB-Verbindung und eigene
     HTTP-Session pro Thread -- psycopg2-Verbindungen sind nicht threadsicher,
-    eine geteilte Verbindung würde zu vermischten Transaktionen führen."""
+    eine geteilte Verbindung würde zu vermischten Transaktionen führen.
+    stopp (threading.Event) wird gesetzt, wenn ein Dienst nicht erreichbar ist."""
     session = requests.Session()
     session.auth = (args.nextcloud_user, args.nextcloud_password)
 
@@ -563,6 +689,19 @@ def verarbeite_job_isoliert(job, args, pg_params, zaehler, lock):
             zaehler["ok"] += 1
         print(f"  OK   [{job['action']:8s}] {short[:60]:60s} {info} "
               f"({time.time() - started:.1f}s)", flush=True)
+
+    except DienstNichtErreichbar as e:
+        if stopp is not None:
+            stopp.set()
+        if conn:
+            conn.rollback()
+            try:
+                job_zurueckgeben(conn, job["id"], f"Zurueckgegeben (ohne Versuch): {e}")
+            except Exception:
+                pass  # bleibt 'processing', recover_stale_jobs holt ihn zurueck
+        with lock:
+            zaehler["zurueck"] = zaehler.get("zurueck", 0) + 1
+        print(f"  ZURUECK [{job['action']:8s}] {short[:60]:60s} {e}", flush=True)
 
     except JobCancelled as e:
         if conn:
@@ -586,6 +725,53 @@ def verarbeite_job_isoliert(job, args, pg_params, zaehler, lock):
         session.close()
         if conn:
             conn.close()
+
+
+def endung_von(pfad):
+    m = re.search(r"\.([A-Za-z0-9]{1,5})$", pfad)
+    return m.group(1).lower() if m else "(ohne)"
+
+
+def ohne_namen(text, pfad):
+    """Fehlertext ohne Pfad und Dateinamen (Ausgabe der Simulation)."""
+    name = pfad.rstrip("/").split("/")[-1]
+    for teil in (pfad, name):
+        if teil:
+            text = text.replace(teil, "<DATEI>")
+    return re.sub(r"[^\s'\"(),:;]+\.[A-Za-z0-9]{2,5}\b", "<DATEI>", text)
+
+
+def simulation(args, pg_params):
+    """--simulieren: Gesundheitsprüfung, Probe und die genannten Jobs ohne
+    jede Schreiboperation (kein Claim, kein Heartbeat, kein Speichern)."""
+    probleme = dienste_pruefen(args)
+    print(f"Gesundheitspruefung: {'OK' if not probleme else '; '.join(probleme)}")
+    probe = None if probleme else docling_probe(args)
+    if not probleme:
+        print(f"docling-Probe: {'OK' if probe is None else probe}")
+    if probleme or probe:
+        print("Ergebnis: Lauf wuerde ohne Claim enden (kein Job, kein Versuch gezaehlt).")
+        return 3
+    ids = [int(x) for x in args.job_ids.split(",") if x.strip()]
+    with psycopg2.connect(**pg_params) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT id, origin_path, action, old_path FROM file_jobs WHERE id = ANY(%s) ORDER BY id", (ids,))
+        jobs = cur.fetchall()
+    session = requests.Session()
+    session.auth = (args.nextcloud_user, args.nextcloud_password)
+    zaehler = {"OK": 0, "FEHL": 0, "ZURUECK": 0}
+    for job in jobs:
+        t = time.time()
+        try:
+            info = process_one(job, session, args, None, simulieren=True)
+            art = "OK"
+        except DienstNichtErreichbar as e:
+            info, art = f"{e} -> Job ginge ohne Versuch zurueck, Lauf endet", "ZURUECK"
+        except Exception as e:
+            info, art = ohne_namen(str(e), job["origin_path"])[:160], "FEHL"
+        zaehler[art] += 1
+        print(f"  {art:7s} id={job['id']} .{endung_von(job['origin_path']):5s} {info} ({time.time() - t:.1f}s)", flush=True)
+    print(f"Simulation: {len(jobs)} Jobs – " + ", ".join(f"{k} {v}" for k, v in zaehler.items()))
+    return 0
 
 
 def positiv(minimum, maximum, name):
@@ -632,19 +818,37 @@ def main():
                         help="Anzahl paralleler Threads (Standard 4). Die Arbeit "
                              "besteht überwiegend aus Warten auf Docling/Ollama, "
                              "deshalb bringt Parallelität hier viel.")
+    parser.add_argument("--simulieren", action="store_true",
+                        help="Nur mit --job-ids: verarbeiten ohne Speichern/Statusaenderung")
+    parser.add_argument("--job-ids", default="",
+                        help="Kommagetrennte Job-IDs fuer --simulieren")
     args = parser.parse_args()
+    if args.simulieren and not args.job_ids:
+        parser.error("--simulieren braucht --job-ids")
 
     pg_params = {
         "host": args.pg_host, "port": args.pg_port,
         "dbname": args.pg_db, "user": args.pg_user, "password": args.pg_password,
     }
 
+    if args.simulieren:
+        return simulation(args, pg_params)
+
+    # Vor jedem Zugriff auf die Queue: Dienste bereit? Sonst ohne Claim enden.
+    probleme = dienste_pruefen(args)
+    grund = "; ".join(probleme) if probleme else docling_probe(args)
+    if grund:
+        print(f"ABBRUCH vor dem ersten Job: {grund}. Kein Job uebernommen.", flush=True)
+        return 3
+
     # Eigene Verbindung nur für Claiming und Recovery -- die Worker-Threads
     # bauen sich jeweils ihre eigene auf
     pg_conn = psycopg2.connect(**pg_params)
 
-    zaehler = {"ok": 0, "fail": 0, "cancelled": 0}
+    zaehler = {"ok": 0, "fail": 0, "cancelled": 0, "zurueck": 0}
     lock = threading.Lock()
+    stopp = threading.Event()
+    abbruch = None
 
     try:
         stale, retried, aufgegeben = recover_stale_jobs(pg_conn, args.stale_minutes, args.max_attempts)
@@ -659,6 +863,14 @@ def main():
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:
             verbleibend = args.limit if args.limit else None
             while True:
+                # Gesundheitsprüfung vor jeder Runde (Runde = --parallel Jobs)
+                if stopp.is_set():
+                    abbruch = "Dienst waehrend der Verarbeitung nicht erreichbar"
+                    break
+                probleme = dienste_pruefen(args)
+                if probleme:
+                    abbruch = "; ".join(probleme)
+                    break
                 # Nie mehr claimen als die Threads in einer Runde abarbeiten --
                 # sonst stünden Jobs minutenlang auf 'processing', ohne dass
                 # jemand daran arbeitet (und blockierten die Stale-Erkennung)
@@ -673,7 +885,7 @@ def main():
                     break
 
                 futures = [
-                    pool.submit(verarbeite_job_isoliert, job, args, pg_params, zaehler, lock)
+                    pool.submit(verarbeite_job_isoliert, job, args, pg_params, zaehler, lock, stopp)
                     for job in jobs
                 ]
                 for f in as_completed(futures):
@@ -691,7 +903,11 @@ def main():
         pg_conn.close()
 
     print(f"\nFertig: {zaehler['ok']} erfolgreich, {zaehler['fail']} fehlgeschlagen, "
-          f"{zaehler['cancelled']} ueberholt (Datei zwischenzeitlich verschoben/geloescht).")
+          f"{zaehler['cancelled']} ueberholt (Datei zwischenzeitlich verschoben/geloescht), "
+          f"{zaehler['zurueck']} ohne Versuch zurueckgegeben.")
+    if abbruch:
+        print(f"ABBRUCH: {abbruch}. Lauf beendet, restliche Jobs bleiben pending.", flush=True)
+        return 3
     return 1 if zaehler["fail"] and not zaehler["ok"] else 0
 
 
