@@ -35,11 +35,15 @@ keinen Job-Status. Ausgabe nur mit ID und Endung, ohne Dateinamen.
 """
 
 import argparse
+import csv
 import hashlib
+import io
 import re
 import sys
 import threading
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
@@ -65,6 +69,17 @@ EMBEDDING_DIM = 1024
 # Dateien über dieser Grösse werden übersprungen -- Docling würde daran
 # sehr lange rechnen und die Queue blockieren.
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# Zeitbudget (29.09.2026, Messung 3,9 s pro Chunk bei Batch 32 unter Last).
+# Hartes Limit der Unit: TimeoutStartSec=3600. Reserve 5 min -> 55 min =
+# weiche Frist (25) + laengster Job (30). Vor den Embeddings koennen Download
+# (120 s), LibreOffice (300 s) und docling (600 s) zusammen 17 min dauern;
+# deshalb begrenzt ein Zeitwaechter die GESAMTZEIT des Jobs: ein neuer
+# Embedding-Batch startet nur, solange der Job juenger als 25 min ist
+# (30 min minus 5 min = Ollama-Timeout eines Batches).
+MAX_TEXT_ZEICHEN = 500_000          # ~285 Chunks, ~18,5 min Embeddings
+JOB_EMBED_STOPP_S = 25 * 60
+WEICHE_FRIST_MIN = 25
 
 # Gesundheitsprüfung: kurze Frist, sie läuft vor jeder Runde
 GESUNDHEIT_TIMEOUT = 10
@@ -386,6 +401,95 @@ def convert_legacy(unoserver_url, filename, content):
     return basis + "." + ziel_format, resp.content
 
 
+# CSV und Excel gehen nicht an docling (29.09.: CSV-Fehlerquote 51 %, Excel
+# hing oder liess sich nicht oeffnen). Die Leser lesen vollstaendig (fuer die
+# Gesamtlaenge in documents.text_zeichen_gesamt); gekuerzt wird in process_one
+# auf MAX_TEXT_ZEICHEN. Diese Grenze schuetzt nur den Speicher.
+TABELLE_MAX_ZEICHEN = 50_000_000
+XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XLSX_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def text_dekodieren(content):
+    for kodierung in ("utf-8-sig", "cp1252"):
+        try:
+            return content.decode(kodierung)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("latin-1")  # dekodiert jedes Byte
+
+
+def csv_text(content):
+    """CSV -> eine Zeile pro Datensatz, Zellen mit ' | ' getrennt."""
+    text = text_dekodieren(content).replace("\x00", "")
+    probe = text[:20000]
+    try:
+        dialekt = csv.Sniffer().sniff(probe, delimiters=";,\t|")
+    except csv.Error:
+        class dialekt(csv.excel):  # noqa: N801
+            delimiter = ";" if probe.count(";") >= probe.count(",") else ","
+    zeilen, laenge = [], 0
+    for zeile in csv.reader(io.StringIO(text), dialekt):
+        zellen = [z.strip() for z in zeile if z and z.strip()]
+        if not zellen:
+            continue
+        z = " | ".join(zellen)
+        laenge += len(z) + 1
+        if laenge > TABELLE_MAX_ZEICHEN:
+            zeilen.append("(gekuerzt)")
+            break
+        zeilen.append(z)
+    return "\n".join(zeilen)
+
+
+def xlsx_text(content):
+    """xlsx/xlsm ohne Zusatzpaket: je Blatt eine Ueberschrift, je Zeile die
+    nichtleeren Zellen mit ' | ' getrennt (gemeinsame Texte, Inline-Texte,
+    Zahlen, Formel-Ergebnisse)."""
+    z = zipfile.ZipFile(io.BytesIO(content))
+    namen = set(z.namelist())
+    gemeinsam = []
+    if "xl/sharedStrings.xml" in namen:
+        for _, el in ET.iterparse(z.open("xl/sharedStrings.xml")):
+            if el.tag == XLSX_NS + "si":
+                gemeinsam.append("".join(t.text or "" for t in el.iter(XLSX_NS + "t")))
+                el.clear()
+    ziele = {r.get("Id"): r.get("Target") for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+    teile, laenge = [], 0
+    for blatt in ET.fromstring(z.read("xl/workbook.xml")).iter(XLSX_NS + "sheet"):
+        ziel = ziele.get(blatt.get(XLSX_REL + "id"), "")
+        pfad = ziel.lstrip("/") if ziel.startswith("/") else "xl/" + ziel
+        if pfad not in namen:
+            continue
+        teile.append(f"## Blatt: {blatt.get('name')}")
+        for _, el in ET.iterparse(z.open(pfad)):
+            if el.tag != XLSX_NS + "row":
+                continue
+            zellen = []
+            for c in el.iter(XLSX_NS + "c"):
+                typ, v = c.get("t"), c.find(XLSX_NS + "v")
+                if typ == "inlineStr":
+                    wert = "".join(t.text or "" for t in c.iter(XLSX_NS + "t"))
+                elif v is None or v.text is None:
+                    continue
+                elif typ == "s":
+                    i = int(v.text)
+                    wert = gemeinsam[i] if 0 <= i < len(gemeinsam) else ""
+                else:
+                    wert = v.text
+                if wert.strip():
+                    zellen.append(wert.strip())
+            el.clear()
+            if zellen:
+                zeile = " | ".join(zellen)
+                laenge += len(zeile) + 1
+                if laenge > TABELLE_MAX_ZEICHEN:
+                    teile.append("(gekuerzt)")
+                    return "\n".join(teile).replace("\x00", "")
+                teile.append(zeile)
+    return "\n".join(teile).replace("\x00", "")
+
+
 JFIF_ERSATZ_DPI = 96
 
 
@@ -423,8 +527,19 @@ def extract_text(docling_url, unoserver_url, filename, content):
     (.doc/.xls/.ppt/.rtf) werden vorher über LibreOffice nach OOXML gewandelt."""
     if filename.lower().endswith(".msg"):
         return extract_msg_text(content, filename)
+    if filename.lower().endswith(".csv"):
+        return csv_text(content)
 
     filename, content = convert_legacy(unoserver_url, filename, content)
+
+    if filename.lower().endswith((".xlsx", ".xlsm")):
+        try:
+            return xlsx_text(content)
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, ValueError) as exc:
+            # Eigener Leser scheitert (Datei ungewoehnlich) -> bisheriger Weg ueber docling
+            art = ("OLE-Container (verschluesselt oder alte xls)" if content[:4] == b"\xd0\xcf\x11\xe0"
+                   else "leer" if not content else f"Kopf {content[:4].hex()}")
+            print(f"    xlsx-Leser: {type(exc).__name__} ({art}), weiter mit docling", flush=True)
 
     files = {"files": (filename, content)}
     resp = http("docling", "POST",
@@ -504,22 +619,30 @@ def guess_source(origin_path):
     return "unklar"
 
 
-def store_document(pg_conn, job_id, origin_path, filename, content_hash, chunks, embeddings):
+def store_document(pg_conn, job_id, origin_path, filename, content_hash, chunks, embeddings,
+                   gekuerzt=False, zeichen_gesamt=None):
     """Schreibt Dokument + Chunks. Bestehende Chunks werden vorher entfernt
-    (Upsert), damit bei einer Neuverarbeitung keine Karteileichen bleiben."""
+    (Upsert), damit bei einer Neuverarbeitung keine Karteileichen bleiben.
+    gekuerzt=True: nur ein Teil des Textes ist indexiert (Zeichengrenze oder
+    Zeitwaechter) -> documents.text_gekuerzt und file_tracking.index_status
+    'gekuerzt', damit die Datei abfragbar bleibt und spaeter vollstaendig
+    nachindexiert werden kann."""
     with pg_conn.cursor() as cur:
         assert_job_still_valid(cur, job_id)
         cur.execute(
             """INSERT INTO documents
-               (origin_type, origin_path, filename, content_hash, source, indexed_at)
-               VALUES ('nextcloud_file', %s, %s, %s, %s, now())
+               (origin_type, origin_path, filename, content_hash, source, indexed_at,
+                text_gekuerzt, text_zeichen_gesamt)
+               VALUES ('nextcloud_file', %s, %s, %s, %s, now(), %s, %s)
                ON CONFLICT (origin_type, origin_path) DO UPDATE SET
                  filename = EXCLUDED.filename,
                  content_hash = EXCLUDED.content_hash,
                  source = EXCLUDED.source,
+                 text_gekuerzt = EXCLUDED.text_gekuerzt,
+                 text_zeichen_gesamt = EXCLUDED.text_zeichen_gesamt,
                  updated_at = now()
                RETURNING id""",
-            (origin_path, filename, content_hash, guess_source(origin_path)),
+            (origin_path, filename, content_hash, guess_source(origin_path), gekuerzt, zeichen_gesamt),
         )
         document_id = cur.fetchone()[0]
 
@@ -540,9 +663,9 @@ def store_document(pg_conn, job_id, origin_path, filename, content_hash, chunks,
 
         cur.execute(
             """UPDATE file_tracking
-               SET index_status = 'indexed', indexed_at = now(), content_sha256 = %s
+               SET index_status = %s, indexed_at = now(), content_sha256 = %s
                WHERE origin_path = %s""",
-            (content_hash, origin_path),
+            ("gekuerzt" if gekuerzt else "indexed", content_hash, origin_path),
         )
     pg_conn.commit()
     return document_id
@@ -601,6 +724,7 @@ def handle_move(pg_conn, job_id, new_path, old_path):
 def process_one(job, session, args, pg_conn, simulieren=False):
     """simulieren=True: alles bis und mit Embedding, aber nichts speichern
     (pg_conn ist dann None, auch kein Heartbeat)."""
+    job_start = time.time()
     action = job["action"]
     path = job["origin_path"]
     job_id = job["id"]
@@ -629,7 +753,9 @@ def process_one(job, session, args, pg_conn, simulieren=False):
     content_hash = hashlib.sha256(content).hexdigest()  # immer vom Original
     content, dichte_korrigiert = jfif_dichte_korrigieren(content)
     hinweis = " (JFIF-Dichte korrigiert)" if dichte_korrigiert else ""
+    t_umwandlung = time.time()
     text = extract_text(args.docling_url, args.unoserver_url, filename, content)
+    t_umwandlung = time.time() - t_umwandlung
     heartbeat(pg_conn, job_id)  # Textextraktion geschafft (kann bis 10 Min dauern)
 
     # Postgres-Text erlaubt kein NUL-Zeichen ("A string literal cannot contain
@@ -638,23 +764,44 @@ def process_one(job, session, args, pg_conn, simulieren=False):
         text = text.replace("\x00", "")
         hinweis += " (NUL-Zeichen entfernt)"
 
+    # Zeichengrenze: nur der Anfang wird indexiert, die Datei als 'gekuerzt' markiert
+    zeichen_gesamt = len(text)
+    gekuerzt = zeichen_gesamt > MAX_TEXT_ZEICHEN
+    if gekuerzt:
+        text = text[:MAX_TEXT_ZEICHEN]
+
     chunks = chunk_text(text)
 
     if not chunks:
         # Kein verwertbarer Text (leere Datei, reines Bild ohne erkennbaren Text)
         if not simulieren:
-            store_document(pg_conn, job_id, path, filename, content_hash, [], [])
+            store_document(pg_conn, job_id, path, filename, content_hash, [], [],
+                           False, zeichen_gesamt)
         return "kein Text extrahierbar (0 Chunks)" + hinweis
+
+    if simulieren and getattr(args, "ohne_embedding", False):
+        return (f"{zeichen_gesamt} Zeichen{' -> gekuerzt auf ' + str(len(text)) if gekuerzt else ''}, "
+                f"{len(chunks)} Chunks, Umwandlung {t_umwandlung:.1f}s, Embedding uebersprungen{hinweis}")
 
     embeddings = []
     batch = 32  # mehr Chunks pro Ollama-Aufruf wären speicherhungrig
     for i in range(0, len(chunks), batch):
+        # Zeitwaechter: Gesamtzeit des Jobs begrenzen (siehe JOB_EMBED_STOPP_S)
+        if i > 0 and time.time() - job_start > JOB_EMBED_STOPP_S:
+            chunks = chunks[:i]
+            gekuerzt = True
+            break
         embeddings.extend(embed_batch(args.ollama_url, chunks[i:i + batch]))
         heartbeat(pg_conn, job_id)  # bei vielen Chunks laufen hier viele Runden
 
+    if gekuerzt:
+        # Chunks ueberlappen um CHUNK_OVERLAP Zeichen -> fuer die Anzeige herausrechnen
+        indexiert = min(len(text), sum(len(c) for c in chunks) - CHUNK_OVERLAP * max(len(chunks) - 1, 0))
+        hinweis += f" (gekuerzt: ~{indexiert} von {zeichen_gesamt} Zeichen indexiert)"
     if not simulieren:
-        store_document(pg_conn, job_id, path, filename, content_hash, chunks, embeddings)
-    return f"{len(chunks)} Chunks, {len(text)} Zeichen{hinweis}"
+        store_document(pg_conn, job_id, path, filename, content_hash, chunks, embeddings,
+                       gekuerzt, zeichen_gesamt)
+    return f"{len(chunks)} Chunks, {zeichen_gesamt} Zeichen{hinweis}"
 
 
 def recover_stale_jobs(pg_conn, stale_minutes=60, max_attempts=3):
@@ -857,8 +1004,15 @@ def main():
                         help="Anzahl paralleler Threads (Standard 4). Die Arbeit "
                              "besteht überwiegend aus Warten auf Docling/Ollama, "
                              "deshalb bringt Parallelität hier viel.")
+    parser.add_argument("--weiche-frist-minuten", type=positiv(1, 600, "--weiche-frist-minuten"),
+                        default=WEICHE_FRIST_MIN,
+                        help="Nach so vielen Minuten Laufzeit keine neuen Jobs mehr uebernehmen "
+                             "(laufende werden abgeschlossen); zusammen mit dem Zeitwaechter "
+                             "pro Job bleibt der Lauf unter TimeoutStartSec")
     parser.add_argument("--simulieren", action="store_true",
                         help="Nur mit --job-ids: verarbeiten ohne Speichern/Statusaenderung")
+    parser.add_argument("--ohne-embedding", action="store_true",
+                        help="Nur mit --simulieren: bis und mit Chunking, ohne Ollama")
     parser.add_argument("--job-ids", default="",
                         help="Kommagetrennte Job-IDs fuer --simulieren")
     args = parser.parse_args()
@@ -902,6 +1056,11 @@ def main():
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:
             verbleibend = args.limit if args.limit else None
             while True:
+                # Weiche Frist: keine neuen Jobs mehr, der Lauf endet sauber
+                if time.time() - lauf_start > args.weiche_frist_minuten * 60:
+                    print(f"Weiche Frist ({args.weiche_frist_minuten} min) erreicht – "
+                          f"keine neuen Jobs, Lauf endet.", flush=True)
+                    break
                 # Gesundheitsprüfung vor jeder Runde (Runde = --parallel Jobs)
                 if stopp.is_set():
                     abbruch = "Dienst waehrend der Verarbeitung nicht erreichbar"
