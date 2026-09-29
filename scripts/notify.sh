@@ -21,7 +21,7 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" \
   --max-time 15 \
   -H "Title: ${TITEL}" \
   -H "Priority: ${PRIO}" \
-  -d "${NACHRICHT}" \
+  --data-raw "${NACHRICHT}" \
   "${NTFY_URL}" 2>/dev/null)
 
 if [ "$CODE" = "200" ]; then
