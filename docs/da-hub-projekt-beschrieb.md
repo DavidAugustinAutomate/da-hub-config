@@ -1,6 +1,6 @@
 # Projekt-Beschrieb: Automatisierungshub «da-hub»
 
-*Kontextdokument für künftige Chats. Stand: 28.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
+*Kontextdokument für künftige Chats. Stand: 29.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
 *Punkte mit «(unbestätigt)» stammen aus älteren Sessions und wurden seither nicht erneut geprüft.*
 
 ---
@@ -53,9 +53,9 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | ntfy | `:10000` | v2.28.0; Tailscale Serve `:10000` und `:8443/ntfy` → `localhost:9092` (Host-Port **9092**) |
 | PostgreSQL + pgvector | `100.93.33.0:5432` | PostgreSQL 16.15, pgvector 0.8.6; Container `postgres-vector`, DB `knowledge`, User `dahub` |
 | Ollama | `100.93.33.0:11434` | v0.33.3; Embedding-Modell `bge-m3` (1024 Dimensionen) |
-| Docling | `100.93.33.0:5001` | docling-serve v1.32.0; Dokument-Extraktion |
+| Docling | `100.93.33.0:5001` | docling-serve v1.34.0 (seit 29.09. per `dahub-update.sh`); Dokument-Extraktion |
 | Gotenberg | `:3000` | v8.36.0; HTML → PDF; Host-Port auf 0.0.0.0 |
-| LibreOffice unoserver | `100.93.33.0:2004` | Image 3.19 (Neubau 13.09.), LibreOffice 7.6.7.2; REST `POST /request` |
+| LibreOffice unoserver | `100.93.33.0:2004` | Image 3.19 (Neubau vom 20.09., eingespielt 29.09., Image `7dbd8fe5`); REST `POST /request` |
 | Watchtower | – | **Gestoppt seit 28.09.2026** (`restart=no`, Container bleibt stehen). Ersetzt durch `dahub-update.sh` + Wochenbilanz. Rückweg: `docker update --restart=always watchtower && docker start watchtower` |
 | **da-agent** | Telegram `@da_hub_bot` | systemd-Dienst, siehe unten |
 
@@ -67,7 +67,7 @@ Container mit `restart: always`.
 |---|---|---|---|---|
 | `~/stacks/gotenberg/` | `gotenberg` | gotenberg | `gotenberg/gotenberg:8.37.0` (seit 28.09. per `dahub-update.sh`) | – |
 | `~/stacks/ntfy/` | `ntfy` | ntfy | `binwiederhier/ntfy:v2.28.0` | – |
-| `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.32.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
+| `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.34.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
 | `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
 | `~/litellm/` | `litellm` | litellm | `litellm:v1.85.0` | `.env` (600) |
 | `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.8`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
@@ -77,7 +77,7 @@ Container mit `restart: always`.
 - Portainer-Stacks liegen unter `/var/lib/docker/volumes/portainer_data/_data/compose/<Nr>/docker-compose.yml` (nur mit sudo lesbar). Keiner der Stacks bezieht Variablen aus der Portainer-DB; nur Stack 6 hatte eine `stack.env` (eine Variable)
 - Die Compose-Dateien in `~/stacks/` sind identisch mit `compose/*-stack.yml` im Repo (Werte nur als `${VAR}`)
 - Container, die nicht neu erstellt wurden, tragen im Label `working_dir` noch den alten Pfad (postgres-vector); das korrigiert sich beim nächsten Update
-- Rückfall-Images: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau), `dahub-rueckfall/mariadb:11.4.13-vor-uebernahme` (MariaDB vor dem Neubau desselben Tags)
+- Rückfall-Images: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau), `dahub-rueckfall/mariadb:11.4.13-vor-uebernahme` (MariaDB vor dem Neubau desselben Tags); von `dahub-update.sh`: `dahub-rueckfall/<dienst>:vorher` (Stand 29.09.: docling `5d1a649d` = v1.32.0, libreoffice `2bea150a`, gotenberg `87c16b9f`)
 - Nextcloud-Sicherungen: `~/backup/` (700); Dump vor der Übernahme `nextcloud-20260928-1956.sql` + `.version.php`, Test-Dump `nextcloud-test-20260928-1846.sql` (je 132 MB, 600). Dump über den App-Benutzer: `mariadb-dump --single-transaction --no-tablespaces --quick` (3 s, 134 Tabellen, alle InnoDB)
 - Testdatei für Funktionstests: `~/stacks/tests/test.pdf` (von Gotenberg erzeugt, enthält das Merkwort `Dahubtest4711`)
 
@@ -272,6 +272,7 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 - `~/stacks/bin/dahub-update.sh` (Phase 2): `--pruefen` zeigt fällige Updates; `--gruppe auto` bzw. `--dienst X [--version V]` aktualisiert mit Tests und Rückfall. Log `~/.local/state/dahub-update.log`. Karenzzeit 7 Tage, Linien in `dienste.conf`. Ollama-Test mit Kosinus-Vergleich zur Referenz `~/stacks/tests/ollama-referenz.json` (≥ 0.999)
   - Seit 28.09. (Phase 3): `--still` unterdrückt die Meldung bei Erfolg bzw. «nichts fällig» (Fehler werden weiter sofort gemeldet). Jeder `--gruppe`-Lauf schreibt `~/.local/state/dahub-update-ergebnis-<gruppe>` (zeit, epoch, rc, text)
   - `dienste.conf` hat eine 8. Spalte **meldelinie**: Bei Linie `-` meldet `--pruefen` passende Tags als «nur Meldung», spielt sie aber nie ein. Aufgenommen: `postgres-vector` (`^pg16$`, Test `t_pgvector`) und `portainer` (`^latest$`, Stack `-` = ohne Compose-Datei: Tag aus dem Container, Update wird verweigert, «von Hand»). n8n/LiteLLM meldet weiterhin `check-versionen.py`
+  - `--simulieren` (seit 29.09.): ganzer Ablauf inkl. Flag, Warten auf den Worker, Rückfall-Tags und Tests, aber ohne pull/up/Compose-Änderung/Commit/ntfy – vor Änderungen am Skript immer zuerst so laufen lassen
   - `--dienst X --version <gleicher Tag>` zieht einen Neubau desselben Tags (ausser Nextcloud); bei unveränderter Image-ID geschieht nichts
 - **`dahub-update.timer`** (seit 28.09.): sonntags 03:30, `--gruppe auto --still`, `Persistent=true`; der Service wartet vor dem Start, bis der Server 15 min läuft (nachgeholter Lauf nach Neustart), `TimeoutStartSec=3h`
 - **`dahub-wochenbilanz.timer`** (seit 28.09.): montags 08:05, `~/stacks/bin/dahub-wochenbilanz.sh` → eine Meldung: Sonntagslauf (Totmann: fehlt er oder ist er älter als 48 h → Priorität high), Container laufend/ungesund (erwartet = `restart always|unless-stopped`), Indexierung pending/done und neu endgültig gescheitert seit der Vorwoche (Stand in `~/.local/state/dahub-wochenbilanz.stand`, Basis 28.09.: done 111'425, endgültig 1'107), verfügbare Freigabe-Updates. `--anzeigen` = nur ausgeben, nichts senden, nichts merken
@@ -305,7 +306,16 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 4. **Erster Handlauf 21:52 abgebrochen**, ohne Eingriff (Flag gesetzt, sofort wieder entfernt, kein Container berührt): Die Prüfung `systemctl cat … | grep -qF` scheiterte unter `pipefail` an SIGPIPE, weil nach dem Treffer noch das alte Laufzeit-Drop-in `pause.conf` ausgegeben wurde – nachgestellt **182 von 200 falsch negativ**. Der gotenberg-Lauf um 21:23 kam nur zufällig durch. Gefährlicher war dieselbe Falle in der Warteschleife auf den Worker: Sie hätte einen laufenden Worker nie als aktiv erkannt (Mock 0/20) und docling mitten im Lauf neu gestartet
 5. **Korrektur:** alle 10 Stellen `… | grep -q` / `… | head` in `dahub-update.sh` und `dahub-wochenbilanz.sh` auf Variable + Here-String bzw. `${var%%$'\n'*}` umgestellt; auf dem Server 200/200 für alle drei Drop-ins, alle 10 Funktionstests grün. Sicherungen: `~/tmp/p3-backup/` (vor Phase 3), `~/tmp/p3-backup2/` (vor der Korrektur)
 6. **David (sudo):** `/run/systemd/system/wissensbasis-worker.service.d/pause.conf` entfernt, vier Units installiert, `daemon-reload`, beide Timer enabled; `NeedDaemonReload=no` geprüft. Erster Timerlauf So 04.10. 03:30, erste Bilanz Mo 05.10. 08:05
-7. **Zweiter Handlauf** seit 22:01:38 (`--gruppe auto`, ohne `--still`, Ergebnis per ntfy): docling v1.32.0 → v1.34.0, libreoffice 3.19 (Neubau). Wartete zum Zeitpunkt der Dokumentation noch auf den Worker-Lauf von 21:26. Auswertung und Commit der Compose-Änderung in der nächsten Sitzung
+7. **Zweiter Handlauf** seit 22:01:38 (`--gruppe auto`, ohne `--still`, Ergebnis per ntfy): **brach um 23:11:49 ab** («Worker nach 70 min noch aktiv»), ohne Eingriff an Containern; zwei Meldungen (high + urgent). Ursache und Behebung siehe Änderungsprotokoll 29.09.
+
+## Änderungsprotokoll 29.09.2026 (Phase 3: Warteschleife, Simulation, erster echter Gruppenlauf)
+
+1. **Ursache des Abbruchs 23:11 (gemessen):** `systemctl show -p ActiveState --value A B C` trennt die Units durch **Leerzeilen** (`activating\n\ninactive\n\ninactive`). Die Warteschleife `grep -qvxE 'inactive|failed'` wertete jede Leerzeile als «nicht ruhig» → das Skript hielt den Worker **immer** für aktiv. Der Fehler steckte schon in der ursprünglichen Fassung; die SIGPIPE-Korrektur vom 28.09. machte ihn von «meistens» zu «immer». Der Worker-Lauf von 21:26 endete spätestens 22:26 (`TimeoutStartSec=3600`), danach verhinderte das Flag jeden Start. Die Unit-Zeitstempel des Fensters waren überschrieben; `processing_started_at` wird nicht befüllt
+2. **Korrektur `dahub-update.sh`** (Commit `7ab583a`): `aktive_units()` fragt jede Unit einzeln ab (leer/unbekannt = aktiv), Log nennt die aktiven Units alle 10 min; **ein** Abbruchweg `abbruch()` → genau eine Meldung mit Grund im Trap, Grund auch in der Ergebnisdatei (vorher zwei Meldungen); `commit_repo` überspringt den Commit, wenn die Compose-Datei unverändert ist (Neubau), statt «Commit fehlgeschlagen» zu melden
+3. **Neuer Modus `--simulieren`:** echter Ablauf mit Sperre, Flag, Warten, Rückfall-Tags, Dry-Run auf einer Kopie der Compose-Datei (übersprungen, wenn das neue Image ohne pull nicht lokal ist), Tests gegen die laufenden Container – ohne pull, `compose up`, Compose-Änderung, Nextcloud-Wartungsmodus/Dump, Commit, Push und ntfy (Meldungen nur im Log). Ergebnis in `dahub-update-ergebnis-<gruppe>-simulation`, prüft am Ende, dass die Compose-Datei unverändert ist
+4. **Mocktests** grün (Warten: ruhig/aktiv/leer/systemctl-Fehler; Abbruch: eine Meldung, Flag weg, Grund in Ergebnisdatei). **Simulation 1** rot (docling-Dry-Run: Image nicht lokal – Lücke der Simulation, behoben), **Simulation 2** grün: Flag entfernt, 6/6 Timer aktiv, 6/6 Compose-Dateien unverändert, Ergebnisdatei `auto` unverändert, 0 ntfy
+5. **Echter Lauf `--gruppe auto`** 08:32–08:36 im Vordergrund: **docling v1.32.0 → v1.34.0** (`09fc953c`, Commit `7c22979` durch das Skript), **libreoffice 3.19 Neubau** (`7dbd8fe5`). Geprüft: Image-ID = Compose-Tag bei beiden, alle 10 Funktionstests grün, Flag entfernt, Sperre frei, 6/6 Timer aktiv, Nextcloud ohne Wartungsmodus, HEAD = origin/main, Compose-Datei = Repo, genau eine Meldung `[low]`
+6. **Nebenbefund:** docling seit Erstellung 27.09. **3 Neustarts** (`RestartCount=3`, nicht OOM), letzter 29.09. 00:44; im Fenster davor ein ERROR aus `docling.backend.msexcel_backend` → Auswertung mit Punkt G
 
 ## Änderungsprotokoll 28.09.2026 (Phase 1: Nextcloud)
 
@@ -349,8 +359,8 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 
 ## Plan (Stand 28.09.2026)
 
-1. **Phase 3 – erledigt am 28.09.:** `dahub-update.timer`, Wochenbilanz, Watchtower gestoppt (siehe Änderungsprotokoll). **Nächste Sitzung:**
-   - Handlauf vom 28.09. 22:01 auswerten: Log (`tail -n +<letzter Start> ~/.local/state/dahub-update.log`), Wartungsflag entfernt, Worker- und Scan-Timer laufen, docling v1.34.0 / libreoffice-Neubau: Image-ID = Tag in der Compose-Datei, Tests grün. Danach Commit (Compose-Datei, falls das Skript ihn nicht selbst gemacht hat)
+1. **Phase 3 – erledigt am 28./29.09.:** `dahub-update.timer`, Wochenbilanz, Watchtower gestoppt, erster echter Gruppenlauf grün (siehe Änderungsprotokolle). **Offen:**
+   - Punkt G (gescheiterte Indexierungen) – Auswertung 29.09. begonnen
    - DNS (Punkt K): zuerst die zwei lesenden sudo-Schritte (Journal 20.09. 15:25–15:40, `NetworkManager --print-config`), dann `nohook resolv.conf` – Ablauf siehe Punkt K
    - Nach So 04.10. / Mo 05.10.: ersten Timerlauf und erste Wochenbilanz prüfen
 2. **Danach gilt das Aufsetzen als abgeschlossen.** Phase 4 (Freigabe-Knopf im Telegram-Agenten) ist **zurückgestellt**; n8n und LiteLLM bis dahin von Hand mit `dahub-update.sh --dienst … --version …`
@@ -460,6 +470,8 @@ Leitplanke: Nichts verlässt den Server ohne Bestätigung per Button.
 - **Unter Git Bash auf Windows zählt `grep -c $'\r'` falsch** – CRLF mit `file` oder einem Byte-Vergleich (`wc -c` gegen `tr -d '\r' | wc -c`) prüfen
 - **`echo … | grep -q` mit `pipefail`** kann einen Treffer verschlucken (SIGPIPE) – in Skripten `grep -q … <<<"$var"` verwenden
 - **Nachtrag 28.09.:** Das gilt für **jeden** Empfänger, der die Pipe früh schliesst (`grep -q`, `head`, `sed …q`, `awk … exit`) und jeden Sender, der danach noch schreibt (`systemctl cat/show`, `docker`, `occ`). `systemctl cat | grep -q` war in 182 von 200 Fällen falsch. Bei Reviews gezielt nach `| grep -q` und `| head` suchen; erste Zeile per `${var%%$'\n'*}`
+- **`systemctl show -p X --value A B C`** trennt die Units durch Leerzeilen – Zustände mehrerer Units nie gemeinsam per `grep -v` auswerten, sondern je Unit einzeln abfragen
+- **Vor jedem echten Lauf simulieren** (`--simulieren`): Die Simulation fand den Dry-Run-Unterschied, der echte Lauf lief danach ohne Überraschung
 - **Container-Logs** (libreoffice, docling, Worker) enthalten Dateinamen aus KGAG-Mails (Personen, Firmen) – nie ungefiltert ausgeben, nur Status-/Fehlerzeilen
 
 ---
