@@ -25,7 +25,7 @@ services:
       - "100.93.33.0:11434:11434"
 
   docling:
-    image: ghcr.io/docling-project/docling-serve:v1.34.0
+    image: ghcr.io/docling-project/docling-serve:v1.32.0
     container_name: docling
     restart: always
     environment:
