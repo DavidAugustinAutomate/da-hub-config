@@ -53,7 +53,7 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | ntfy | `:10000` | v2.28.0; Tailscale Serve `:10000` und `:8443/ntfy` → `localhost:9092` (Host-Port **9092**) |
 | PostgreSQL + pgvector | `100.93.33.0:5432` | PostgreSQL 16.15, pgvector 0.8.6; Container `postgres-vector`, DB `knowledge`, User `dahub` |
 | Ollama | `100.93.33.0:11434` | v0.33.3; Embedding-Modell `bge-m3` (1024 Dimensionen) |
-| Docling | `100.93.33.0:5001` | docling-serve v1.34.0 (seit 29.09. per `dahub-update.sh`); Dokument-Extraktion |
+| Docling | `100.93.33.0:5001` | docling-serve **v1.32.0** (29.09. kurz v1.34.0, zurückgenommen – siehe Änderungsprotokoll; v1.34.x in `dienste.conf` gesperrt); Dokument-Extraktion |
 | Gotenberg | `:3000` | v8.36.0; HTML → PDF; Host-Port auf 0.0.0.0 |
 | LibreOffice unoserver | `100.93.33.0:2004` | Image 3.19 (Neubau vom 20.09., eingespielt 29.09., Image `7dbd8fe5`); REST `POST /request` |
 | Watchtower | – | **Gestoppt seit 28.09.2026** (`restart=no`, Container bleibt stehen). Ersetzt durch `dahub-update.sh` + Wochenbilanz. Rückweg: `docker update --restart=always watchtower && docker start watchtower` |
@@ -67,7 +67,7 @@ Container mit `restart: always`.
 |---|---|---|---|---|
 | `~/stacks/gotenberg/` | `gotenberg` | gotenberg | `gotenberg/gotenberg:8.37.0` (seit 28.09. per `dahub-update.sh`) | – |
 | `~/stacks/ntfy/` | `ntfy` | ntfy | `binwiederhier/ntfy:v2.28.0` | – |
-| `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.34.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
+| `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.32.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
 | `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
 | `~/litellm/` | `litellm` | litellm | `litellm:v1.85.0` | `.env` (600) |
 | `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.8`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
@@ -77,7 +77,7 @@ Container mit `restart: always`.
 - Portainer-Stacks liegen unter `/var/lib/docker/volumes/portainer_data/_data/compose/<Nr>/docker-compose.yml` (nur mit sudo lesbar). Keiner der Stacks bezieht Variablen aus der Portainer-DB; nur Stack 6 hatte eine `stack.env` (eine Variable)
 - Die Compose-Dateien in `~/stacks/` sind identisch mit `compose/*-stack.yml` im Repo (Werte nur als `${VAR}`)
 - Container, die nicht neu erstellt wurden, tragen im Label `working_dir` noch den alten Pfad (postgres-vector); das korrigiert sich beim nächsten Update
-- Rückfall-Images: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau), `dahub-rueckfall/mariadb:11.4.13-vor-uebernahme` (MariaDB vor dem Neubau desselben Tags); von `dahub-update.sh`: `dahub-rueckfall/<dienst>:vorher` (Stand 29.09.: docling `5d1a649d` = v1.32.0, libreoffice `2bea150a`, gotenberg `87c16b9f`)
+- Rückfall-Images: `dahub-rueckfall/libreoffice-unoserver:3.19-vor-uebernahme` (libreoffice vor dem Neubau), `dahub-rueckfall/mariadb:11.4.13-vor-uebernahme` (MariaDB vor dem Neubau desselben Tags); von `dahub-update.sh`: `dahub-rueckfall/<dienst>:vorher` (Stand 29.09. nach dem Rückfall: docling `09fc953c` = v1.34.0 – **nicht verwenden**, libreoffice `2bea150a`, gotenberg `87c16b9f`)
 - Nextcloud-Sicherungen: `~/backup/` (700); Dump vor der Übernahme `nextcloud-20260928-1956.sql` + `.version.php`, Test-Dump `nextcloud-test-20260928-1846.sql` (je 132 MB, 600). Dump über den App-Benutzer: `mariadb-dump --single-transaction --no-tablespaces --quick` (3 s, 134 Tabellen, alle InnoDB)
 - Testdatei für Funktionstests: `~/stacks/tests/test.pdf` (von Gotenberg erzeugt, enthält das Merkwort `Dahubtest4711`)
 
@@ -315,7 +315,11 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 3. **Neuer Modus `--simulieren`:** echter Ablauf mit Sperre, Flag, Warten, Rückfall-Tags, Dry-Run auf einer Kopie der Compose-Datei (übersprungen, wenn das neue Image ohne pull nicht lokal ist), Tests gegen die laufenden Container – ohne pull, `compose up`, Compose-Änderung, Nextcloud-Wartungsmodus/Dump, Commit, Push und ntfy (Meldungen nur im Log). Ergebnis in `dahub-update-ergebnis-<gruppe>-simulation`, prüft am Ende, dass die Compose-Datei unverändert ist
 4. **Mocktests** grün (Warten: ruhig/aktiv/leer/systemctl-Fehler; Abbruch: eine Meldung, Flag weg, Grund in Ergebnisdatei). **Simulation 1** rot (docling-Dry-Run: Image nicht lokal – Lücke der Simulation, behoben), **Simulation 2** grün: Flag entfernt, 6/6 Timer aktiv, 6/6 Compose-Dateien unverändert, Ergebnisdatei `auto` unverändert, 0 ntfy
 5. **Echter Lauf `--gruppe auto`** 08:32–08:36 im Vordergrund: **docling v1.32.0 → v1.34.0** (`09fc953c`, Commit `7c22979` durch das Skript), **libreoffice 3.19 Neubau** (`7dbd8fe5`). Geprüft: Image-ID = Compose-Tag bei beiden, alle 10 Funktionstests grün, Flag entfernt, Sperre frei, 6/6 Timer aktiv, Nextcloud ohne Wartungsmodus, HEAD = origin/main, Compose-Datei = Repo, genau eine Meldung `[low]`
-6. **Nebenbefund:** docling seit Erstellung 27.09. **3 Neustarts** (`RestartCount=3`, nicht OOM), letzter 29.09. 00:44; im Fenster davor ein ERROR aus `docling.backend.msexcel_backend` → Auswertung mit Punkt G
+6. **Nebenbefund:** docling seit Erstellung 27.09. **3 Neustarts** (`RestartCount=3`, nicht OOM), letzter 29.09. 00:44; im Fenster danach ein ERROR aus `docling.backend.msexcel_backend` (Umwandlungsfehler, kein Absturz). Ursache der Neustarts nicht mehr feststellbar (Container beim Update neu erstellt, Logs weg)
+7. **Regression docling v1.34.0:** Seit dem Update 08:35 scheiterte **jeder** Worker-Job mit `Docling-Fehler (404): {"detail":"Task result not found. Please wait for a completion status."}` (100 Jobs in den Läufen 08:40 und 08:45; nur die 2 Testumwandlungen gelangen). `t_docling` war grün, weil er eine einzelne Anfrage **ohne** die Felder des Workers schickte (`to_formats=md`, `do_ocr=true`, `ocr_lang=deu,eng`, `--parallel 2`). Gefunden bei der Auswertung zu Punkt G
+8. **Rückfall** 08:46–08:48 mit `dahub-update.sh --dienst docling --version v1.32.0` (Freigabe David): Image-ID = Tag `5d1a649d`, Test grün, Flag entfernt, Timer aktiv, Commit `a142ee8`. Seither 0 ERROR im docling-Log
+9. **100 Jobs zurückgesetzt** (Freigabe David, Grundsatz «kein Job geht verloren»): Auswahl über den Fehlertext (keine Zeitspalte für Fehlschläge vorhanden; der Text kam unter den 1'194 alten Fehlern nicht vor), alle hatten `attempts = 2`, **keiner erreichte 3**. `status='pending', attempts=0, last_error=NULL` in einer Transaktion mit Obergrenze
+10. **`t_docling` neu** (Commit `b76a2db`): zwei Umwandlungen gleichzeitig mit denselben Feldern wie `process_jobs.py`, prüft HTTP 200, `status` success/partial_success und das Merkwort in `md_content`; gegen v1.32.0 3× grün. **Linie docling** `^v1\.(?!34\.)\d+\.\d+$` – v1.34.x wird nicht automatisch eingespielt, bis ein Test das Problem ausschliesst. Offen: den neuen Test einmal gegen v1.34.0 laufen lassen (muss rot sein), z. B. mit einem befristeten zweiten Container auf einem anderen Port. Achtung: Die Linie lässt v1.33.0 bzw. v1.35.0 zu – Schutz ist dann der neue Test mit automatischem Rückfall
 
 ## Änderungsprotokoll 28.09.2026 (Phase 1: Nextcloud)
 
@@ -377,6 +381,27 @@ D. ~~Nextcloud-Hintergrundjobs auf Cron umstellen~~ **erledigt 28.09.2026** (`ne
 E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen. Seit 28.09. zusätzlich: gestoppter Container `watchtower` + Image `nickfedor/watchtower`, sobald feststeht, dass er nicht mehr gebraucht wird
 F. Portainer-Einträge 1, 2, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
 G. **Endgültig gescheiterte Indexierungen steigen stark:** laut täglicher Fehlermeldung **587 (20.09.) → 1'106 (28.09.) in 8 Tagen**, rund 65 pro Tag (`file_jobs.failed` 597 am 15.09., 1'072 am 27.09.). Blieb unbemerkt, weil die Meldungen seit 21.09. nicht zugestellt wurden (Punkt K). Die «neu»-Zahl der Meldung summiert sich seither auf (523 am 28.09.), weil die IDs nur nach erfolgreichem Versand gemerkt werden. Ursache (Fehlertypen) vordringlich untersuchen; mit dem Rückholen (Punkt 1) zusammen anschauen
+   - **Grundsatz (David, 29.09.): Kein Job geht verloren.** Jede Fehlerklasse braucht einen Weg, auf dem die Datei am Ende doch indexiert wird. **Alle übrigen gescheiterten Jobs werden nach Abarbeitung des Rückstands erneut versucht** (`attempts=0`), jeweils nachdem der Weg für ihre Klasse umgesetzt ist
+   - **Auswertung 29.09. (nur lesend), 1'194 endgültig gescheitert.** Knick am 22.09.: vorher 2–8 pro Tag, danach 45–101 – nicht zeitlich, sondern weil der Worker (arbeitet nach aufsteigender ID) den Bereich der Mail-Anhänge aus den PSTs erreichte (ID ≥ 80'000). Keine Zeitspalte für Fehlschläge; Trennung alt/neu über die Reihenfolge in `dahub-index-fehler.ids` (Zeilen 1–587 bis 21.09.)
+
+| # | Klasse | Anzahl | Anteil | Endungen | Ursache | Weg zur Indexierung |
+|---|---|---|---|---|---|---|
+| 1 | Bild nicht ladbar (`Could not load image`) | 585 | 49,0 % | jpg | Alle aus dem Mail/PST-Bereich (10 % der dortigen jpg); vermutlich Inline-/Signaturbilder mit falscher Endung oder abgeschnitten | Stichprobe: echter Typ (Magic Bytes) und Grösse ermitteln. Im Worker vor docling mit Pillow öffnen; falscher Typ → umwandeln (EMF/WMF über LibreOffice, sonst Pillow → PNG); nicht lesbar oder winzig → als Dokument **ohne Text** indexieren (Pfad, Mail-Kontext), Status `done` statt `failed` |
+| 2 | docling 504, Zeitüberschreitung (alt, 120 s) | 412 | 34,5 % | pdf 361, md 41, übrige 10 | Serverlimit vor 15.09. | Zurücksetzen – Limit ist seit 15.09. 600 s; Rest wie Klasse 5 |
+| 3 | docling nicht erreichbar (`Connection refused`) | 93 | 7,8 % | md 52, pdf 29, übrige 12 | Ausfall von docling; 82 der neuen in **einem** zusammenhängenden ID-Block → ein Ausfall, den der Worker in drei Läufen zu 82 endgültigen Fehlern vervielfacht hat. Kein belegbarer Zusammenhang mit Excel (1 Excel-Job in der Nähe, Grundrate 1,3 %) | Zurücksetzen (Dateien sind in Ordnung). Vorbeugen: Worker prüft vor jedem Job `/health`; ist docling/LibreOffice/Ollama nicht erreichbar, bricht er den Lauf ab **ohne** `attempts` zu erhöhen |
+| 4 | CSV nicht ladbar (`CsvDocumentBackend`) | 32 | 2,7 % | csv (Fehlerquote 51 %) | docling-CSV-Parser (Kodierung/Trennzeichen) | CSV nicht an docling: im Worker mit `csv.Sniffer` und Kodierungserkennung (utf-8/cp1252) lesen, als Text/Markdown-Tabelle indexieren |
+| 5 | Read timeout 600 s | 27 | 2,3 % | pdf 26, xlsx 1 | Grosse PDFs (OCR) | Asynchrone docling-API (`/v1/convert/file/async` + Abfrage) mit langer Frist, oder PDF seitenweise in Teilen umwandeln |
+| 6 | Worker-Abbruch («Nach mehreren Abbrüchen») | 9 | 0,8 % | xlsx 7, xls 2 | Job hing, bis der Worker-Lauf abgebrochen wurde | Excel nicht über docling: eigener Weg mit openpyxl/pandas (Blätter → Text), Grössenlimit pro Blatt |
+| 7 | PDF defekt/nicht lesbar | 7 | 0,6 % | pdf | beschädigt oder ungewöhnlich aufgebaut | Mit qpdf/Ghostscript reparieren; sonst Seiten rastern (pdftoppm) und als Bilder per OCR |
+| 8 | Bug `NameError: endung` | 7 | 0,6 % | xls | `process_jobs.py` Z. 253 (`convert_legacy`, Fehlerzweig nutzt `endung` statt `rohe_endung`) verdeckt den eigentlichen LibreOffice-Fehler | Variable korrigieren, zurücksetzen; danach je nach echtem Fehler Klasse 6 |
+| 9 | docling-Validierung `SectionHeaderItem level` | 6 | 0,5 % | docx | docling-Fehler bei tiefen Überschriftenebenen | docx über LibreOffice → PDF, dann docling; alternativ neuere docling-Version (mit parallelem Test) |
+| 10 | Verbindung abgebrochen (LibreOffice/Ollama/unbekannt) | 6 | 0,5 % | pdf 4, xls 1, md 1 | vorübergehend | Zurücksetzen; Vorbeugung wie Klasse 3 |
+| 11 | Excel nicht zu öffnen | 4 | 0,3 % | xlsx | docling-Excel-Backend | wie Klasse 6 |
+| 12 | NUL-Zeichen im Text | 3 | 0,3 % | pdf | Postgres-Text erlaubt kein `\x00` | `\x00` vor dem Speichern entfernen, zurücksetzen |
+| 13 | Bild zu gross («decompression bomb») | 2 | 0,2 % | docx | Pillow-Grenze in docling | Bild vorher verkleinern bzw. docx über LibreOffice → PDF |
+| 14 | übrige | 1 | 0,1 % | docx | – | einzeln anschauen |
+
+   - Reihenfolge-Vorschlag: sofort unkritisch zurücksetzbar sind 2, 3, 10 (511 Jobs) – aber erst nach Abarbeitung des Rückstands (Grundsatz oben); Code-Änderungen im Worker für 1, 3 (Vorbeugung), 4, 6/11, 8, 12; danach je Klasse zurücksetzen und die Quote prüfen
 H. Viele alte Nextcloud-Sitzungen/App-Passwörter (Desktop-Clients, Browser, «n8n» vom 24.08.) aufräumen
 I. **MariaDB-Root-Passwort klären:** `MYSQL_ROOT_PASSWORD` (32 Zeichen) wird für `root@localhost` abgewiesen. Klären, welches Passwort gilt bzw. ob Root per Socket/ohne Passwort eingerichtet ist; danach Variable und DB in Einklang bringen (`~/stacks/nextcloude/.env`). Dumps laufen bis dahin über den App-Benutzer
 J. **`MARIADB_AUTO_UPGRADE` prüfen** (Review 28.09. zu `dahub-update.sh`, nur notiert): Ohne diese Variable führt das MariaDB-Image nach einem Versionssprung `mariadb-upgrade` nicht selbst aus. Für Patches innerhalb 11.4.x meist unkritisch; vor einem Wechsel der Linie (z. B. 11.8) klären, ob die Variable gesetzt oder `mariadb-upgrade` im Skript aufgerufen wird. Hängt mit Punkt I zusammen (Root-Zugang)
@@ -388,7 +413,7 @@ L. **Repo-Stände der Skripte gegen den Server abgleichen:** `check-container.sh
 
 ### Bisherige
 
-1. **555 gescheiterte Indexierungen neu anstossen – nicht vergessen.** Erst wenn der Rückstand weitgehend abgearbeitet ist, damit sich das Ergebnis sauber zuordnen lässt. Erwartung: rund 465 gehen mit dem höheren Docling-Timeout durch, rund 120 bleiben als echte Problemfälle übrig, die dann einzeln anzuschauen sind.
+1. **Stand 29.09.: aufgegangen in Punkt G** (alle 1'194 werden nach Abarbeitung des Rückstands erneut versucht). Ursprünglicher Text: **555 gescheiterte Indexierungen neu anstossen – nicht vergessen.** Erst wenn der Rückstand weitgehend abgearbeitet ist, damit sich das Ergebnis sauber zuordnen lässt. Erwartung: rund 465 gehen mit dem höheren Docling-Timeout durch, rund 120 bleiben als echte Problemfälle übrig, die dann einzeln anzuschauen sind.
 
 ```sql
 UPDATE file_jobs SET status='pending', attempts=0, last_error=NULL WHERE status='failed';
@@ -471,6 +496,7 @@ Leitplanke: Nichts verlässt den Server ohne Bestätigung per Button.
 - **`echo … | grep -q` mit `pipefail`** kann einen Treffer verschlucken (SIGPIPE) – in Skripten `grep -q … <<<"$var"` verwenden
 - **Nachtrag 28.09.:** Das gilt für **jeden** Empfänger, der die Pipe früh schliesst (`grep -q`, `head`, `sed …q`, `awk … exit`) und jeden Sender, der danach noch schreibt (`systemctl cat/show`, `docker`, `occ`). `systemctl cat | grep -q` war in 182 von 200 Fällen falsch. Bei Reviews gezielt nach `| grep -q` und `| head` suchen; erste Zeile per `${var%%$'\n'*}`
 - **`systemctl show -p X --value A B C`** trennt die Units durch Leerzeilen – Zustände mehrerer Units nie gemeinsam per `grep -v` auswerten, sondern je Unit einzeln abfragen
+- **Funktionstests müssen wie der echte Client arbeiten** (gleicher Endpunkt, gleiche Felder, gleiche Parallelität). Ein grüner Minimaltest hat am 29.09. eine docling-Version durchgelassen, an der jeder Worker-Job scheiterte. Nach einem Update ausserdem einen echten Lauf des Hauptnutzers prüfen (Worker: `done` steigt, keine neuen Fehlertexte)
 - **Vor jedem echten Lauf simulieren** (`--simulieren`): Die Simulation fand den Dry-Run-Unterschied, der echte Lauf lief danach ohne Überraschung
 - **Container-Logs** (libreoffice, docling, Worker) enthalten Dateinamen aus KGAG-Mails (Personen, Firmen) – nie ungefiltert ausgeben, nur Status-/Fehlerzeilen
 
