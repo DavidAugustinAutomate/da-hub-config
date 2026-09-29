@@ -129,10 +129,31 @@ t_ntfy() {
   wait "$pid" || true
   grep -q "\"message\":\"$msg\"" "$sub"
 }
-t_docling() {
+t_docling() {  # wie process_jobs.py: gleiche Felder, zwei Umwandlungen gleichzeitig (29.09.: v1.34.0 lieferte so 404)
   curl -sf -m 5 "http://$H:5001/health" >/dev/null || return 1
-  curl -s -m 600 -F "files=@$HOME/stacks/tests/test.pdf" "http://$H:5001/v1/convert/file" -o "$tmp/d.json" || return 1
-  grep -q 'Dahubtest4711' "$tmp/d.json"
+  local i p pids=() rc=0
+  for i in 1 2; do
+    curl -s -m 600 -o "$tmp/d$i.json" -w '%{http_code}' -F "files=@$HOME/stacks/tests/test.pdf" \
+      -F to_formats=md -F do_ocr=true -F ocr_lang=deu,eng "http://$H:5001/v1/convert/file" > "$tmp/d$i.code" &
+    pids+=($!)
+  done
+  for p in "${pids[@]}"; do wait "$p" || rc=1; done
+  [ "$rc" = 0 ] || return 1
+  for i in 1 2; do
+    python3 - "$tmp/d$i.json" "$(cat "$tmp/d$i.code")" "$i" <<'PY' || return 1
+import json, sys
+datei, code, nr = sys.argv[1:4]
+try:
+    d = json.load(open(datei))
+except ValueError:
+    d = {}
+md = (d.get("document") or {}).get("md_content") or ""
+ok = code == "200" and d.get("status") in ("success", "partial_success") and "Dahubtest4711" in md
+if not ok:
+    print(f"  t_docling: Anfrage {nr}: HTTP {code}, status {d.get('status')}, Merkwort {'ja' if 'Dahubtest4711' in md else 'nein'}", file=sys.stderr)
+sys.exit(0 if ok else 1)
+PY
+  done
 }
 ollama_embed() {  # fester Testsatz -> $1 (JSON der Ollama-API)
   curl -s -m 180 "http://$H:11434/api/embed" \
