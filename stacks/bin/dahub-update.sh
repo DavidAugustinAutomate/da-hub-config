@@ -5,9 +5,12 @@
 #   dahub-update.sh --gruppe auto                                        aktualisiert alle faelligen Dienste der Gruppe
 #   dahub-update.sh --dienst NAME [--version TAG]                        ein Dienst; --version fuer Freigabe/Major
 #   --still                                                              keine Meldung bei Erfolg/nichts faellig (Timer)
+#   --simulieren                                                         ganzer Ablauf (Sperre, Flag, Warten, Rueckfall-Tags,
+#                                                                        Dry-Run, Tests) ohne pull/up/Compose-Aenderung/Commit/ntfy
 #
 # Laeuft als david (Gruppe docker). Werte aus .env-Dateien werden nie ausgegeben.
-# Ergebnis jedes --gruppe-Laufs in ~/.local/state/dahub-update-ergebnis-<gruppe> (fuer dahub-wochenbilanz.sh).
+# Ergebnis jedes --gruppe-Laufs in ~/.local/state/dahub-update-ergebnis-<gruppe> (fuer dahub-wochenbilanz.sh),
+# bei --simulieren in ...-<gruppe>-simulation.
 # Pause von Worker/Scan/Nextcloud-Cron ueber das Wartungsflag (feste Drop-ins dahub-wartung.conf).
 set -euo pipefail
 umask 077
@@ -34,30 +37,37 @@ OLLAMA_SATZ="Der Mietvertrag fuer den Standort Zuerich wird per 31. Dezember gek
 OLLAMA_SCHWELLE=0.999
 
 # ------------------------------------------------------------------ Argumente
-modus=update; gruppe=""; dienst=""; version=""; still=0
+modus=update; gruppe=""; dienst=""; version=""; still=0; sim=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pruefen) modus=pruefen ;;
     --still) still=1 ;;
+    --simulieren) sim=1 ;;
     --ollama-referenz) modus=referenz ;;
     --gruppe) gruppe=${2:?}; shift ;;
     --dienst) dienst=${2:?}; shift ;;
     --version) version=${2:?}; shift ;;
-    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $1"; exit 2 ;;
   esac
   shift
 done
 [ "$modus" = referenz ] || [ -n "$gruppe" ] || [ -n "$dienst" ] || { echo "--gruppe oder --dienst angeben"; exit 2; }
 [ -z "$version" ] || [ -n "$dienst" ] || { echo "--version nur zusammen mit --dienst"; exit 2; }
+[ "$sim" = 0 ] || [ "$modus" = update ] || { echo "--simulieren nicht zusammen mit --pruefen/--ollama-referenz"; exit 2; }
 
 mkdir -p "$STATE"
 tmp=$(mktemp -d)
 log() { echo "$(date '+%F %T') $*"; }
-melden() { "$NOTIFY" "$1" "$2" "${3:-default}" >/dev/null 2>&1 || log "WARNUNG: notify.sh fehlgeschlagen"; }
+sim_log() { log "SIMULATION: $*"; }
+melden() {
+  if [ "$sim" = 1 ]; then sim_log "Meldung [${3:-default}] $1: $2"; return 0; fi
+  "$NOTIFY" "$1" "$2" "${3:-default}" >/dev/null 2>&1 || log "WARNUNG: notify.sh fehlgeschlagen"
+}
 ergebnis() {  # $1 rc, $2 Text – nur fuer --gruppe-Laeufe, atomar ersetzt
   [ -n "$gruppe" ] || return 0
   local f=$STATE/dahub-update-ergebnis-$gruppe
+  [ "$sim" = 0 ] || f+=-simulation
   printf 'zeit=%s\nepoch=%s\nrc=%s\ntext=%s\n' "$(date '+%F %T')" "$(date +%s)" "$1" "${2//$'\n'/ }" > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
@@ -77,7 +87,8 @@ for n in "${REIHE[@]}"; do
 done
 [ "$modus" = referenz ] || [ ${#auswahl[@]} -gt 0 ] || { echo "Kein Dienst gefunden (${dienst:-Gruppe $gruppe})"; exit 2; }
 
-compose() { docker compose --project-directory "${DIR[$1]}" -f "${DIR[$1]}/docker-compose.yml" "${@:2}"; }
+declare -A CF   # abweichende Compose-Datei pro Dienst (--simulieren: geaenderte Kopie in $tmp)
+compose() { docker compose --project-directory "${DIR[$1]}" -f "${CF[$1]:-${DIR[$1]}/docker-compose.yml}" "${@:2}"; }
 tag_in_datei() {  # aktueller Tag des Dienstes laut Compose-Datei (ohne Aufloesung von Werten)
   if [ "${DIR[$1]}" = "-" ]; then  # ohne Compose-Datei: Tag des laufenden Containers
     local img; img=$(docker inspect -f '{{.Config.Image}}' "$1") || return 1
@@ -266,7 +277,7 @@ if [ "$modus" = update ]; then
   exec 9>"$LOCK"
   flock -n 9 || { log "Ein anderer Lauf ist aktiv – Abbruch"; exit 3; }
   exec > >(tee -a "$LOG") 2>&1
-  log "=== dahub-update ${gruppe:+--gruppe $gruppe}${dienst:+--dienst $dienst}${version:+ --version $version} ==="
+  log "=== dahub-update ${gruppe:+--gruppe $gruppe}${dienst:+--dienst $dienst}${version:+ --version $version}$([ "$sim" = 1 ] && echo ' (SIMULATION)') ==="
 fi
 for n in "${auswahl[@]}"; do plane "$n"; done
 faellig=(); nurmeldung=()
@@ -289,7 +300,12 @@ if [ ${#faellig[@]} -eq 0 ]; then
   rm -rf "$tmp"; exit 0
 fi
 
-ok=(); rot=(); zurueck=(); nc_wartung=0; flag_von_uns=0
+ok=(); rot=(); zurueck=(); nc_wartung=0; flag_von_uns=0; abbruch_text=""; abbruch_prio=urgent
+abbruch() {  # $1 Grund, $2 Prioritaet – Meldung genau einmal, im Trap
+  abbruch_text=$1; abbruch_prio=${2:-urgent}
+  log "ABBRUCH: $1"
+  exit 1
+}
 aufraeumen() {
   local rc=$?
   if [ "$flag_von_uns" = 1 ]; then
@@ -297,8 +313,9 @@ aufraeumen() {
   fi
   rm -rf "$tmp"
   if [ "$rc" -ne 0 ] && [ "${fertig:-0}" != 1 ]; then
-    ergebnis "$rc" "ABGEBROCHEN (rc=$rc), siehe $LOG"
-    melden "da-hub: Update ABGEBROCHEN" "dahub-update brach unerwartet ab (rc=$rc). Log: $LOG" urgent
+    local t=${abbruch_text:-"unerwarteter Abbruch (rc=$rc)"}
+    ergebnis "$rc" "ABGEBROCHEN: $t"
+    melden "da-hub: Update abgebrochen" "$t – nichts (weiter) aktualisiert. Log: $LOG" "$abbruch_prio"
   fi
 }
 trap aufraeumen EXIT
@@ -309,28 +326,43 @@ touch "$FLAG"; flag_von_uns=1
 log "Wartungsflag gesetzt: $FLAG"
 for u in $PAUSE_UNITS; do
   # nie "systemctl … | grep -q" unter pipefail: grep beendet sich beim Treffer, systemctl bekommt SIGPIPE (28.09.: 182/200 falsch)
-  grep -qF "ConditionPathExists=!$FLAG" <<<"$(systemctl cat "$u" 2>/dev/null)" || { log "ABBRUCH: $u kennt das Wartungsflag nicht (Drop-in fehlt)"; exit 1; }
-  [ "$(systemctl show -p NeedDaemonReload --value "$u")" = no ] || { log "ABBRUCH: $u braucht daemon-reload"; exit 1; }
+  grep -qF "ConditionPathExists=!$FLAG" <<<"$(systemctl cat "$u" 2>/dev/null)" || abbruch "$u kennt das Wartungsflag nicht (Drop-in fehlt)"
+  [ "$(systemctl show -p NeedDaemonReload --value "$u")" = no ] || abbruch "$u braucht daemon-reload"
 done
 log "Drop-ins geladen: $PAUSE_UNITS"
 
+aktive_units() {  # gibt aktive Pause-Units aus; unbekannter Zustand zaehlt als aktiv
+  # je Unit einzeln: "systemctl show --value a b c" trennt Units durch Leerzeilen (29.09.: Warten lief immer 70 min)
+  local u s
+  for u in $PAUSE_UNITS; do
+    s=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || s=unbekannt
+    case "$s" in inactive|failed) ;; *) printf '%s(%s) ' "${u%.service}" "${s:-leer}" ;; esac
+  done
+}
 braucht_worker_pause=0
 for n in "${faellig[@]}"; do [[ "$WORKER_DIENSTE" == *" $n "* ]] && braucht_worker_pause=1; done
 if [ "$braucht_worker_pause" = 1 ]; then
   log "Warte auf Ende laufender Worker-/Scan-/Cron-Laeufe (max. $((WORKER_MAX / 60)) min) ..."
-  start=$(date +%s)
-  # leere Ausgabe (systemctl-Fehler) zaehlt als aktiv -> weiter warten
-  while grep -qvxE 'inactive|failed' <<<"$(systemctl show -p ActiveState --value $PAUSE_UNITS)"; do
-    [ $(( $(date +%s) - start )) -lt "$WORKER_MAX" ] || { log "ABBRUCH: Worker nach $((WORKER_MAX / 60)) min noch aktiv"; melden "da-hub: Update abgebrochen" "Worker lief nach $((WORKER_MAX / 60)) min noch – nichts aktualisiert." high; exit 1; }
+  start=$(date +%s); letzte=0
+  while aktiv=$(aktive_units); [ -n "$aktiv" ]; do
+    dauer=$(( $(date +%s) - start ))
+    [ "$dauer" -lt "$WORKER_MAX" ] || abbruch "nach $((WORKER_MAX / 60)) min noch aktiv: $aktiv" high
+    if [ $(( dauer - letzte )) -ge 600 ] || [ "$letzte" = 0 ]; then log "aktiv: $aktiv(seit $((dauer / 60)) min)"; letzte=$((dauer + 1)); fi
     sleep 30
   done
-  haengend=$(docker exec postgres-vector psql -U dahub -d knowledge -qAtc "UPDATE file_jobs SET status='pending' WHERE status='processing' RETURNING id" | grep -c . || true)
-  log "Worker ruht; haengende processing-Jobs auf pending gesetzt: $haengend"
+  log "Worker, Scan und Cron ruhen (nach $(( ($(date +%s) - start) / 60 )) min)"
+  if [ "$sim" = 1 ]; then
+    haengend=$(docker exec postgres-vector psql -U dahub -d knowledge -qAtc "SELECT count(*) FROM file_jobs WHERE status='processing'")
+    sim_log "haengende processing-Jobs (nur gezaehlt, nicht zurueckgesetzt): $haengend"
+  else
+    haengend=$(docker exec postgres-vector psql -U dahub -d knowledge -qAtc "UPDATE file_jobs SET status='pending' WHERE status='processing' RETURNING id" | grep -c . || true)
+    log "haengende processing-Jobs auf pending gesetzt: $haengend"
+  fi
 fi
 
 # ------------------------------------------------------------------ Hilfen fuer Updates
-setze_tag() {  # $1 Dienst $2 alter Tag $3 neuer Tag – genau eine image-Zeile muss passen
-  local f="${DIR[$1]}/docker-compose.yml" alt="${IMG[$1]}:$2" neu="${IMG[$1]}:$3"
+setze_tag() {  # $1 Dienst $2 alter Tag $3 neuer Tag [$4 Datei] – genau eine image-Zeile muss passen
+  local f="${4:-${DIR[$1]}/docker-compose.yml}" alt="${IMG[$1]}:$2" neu="${IMG[$1]}:$3"
   [ "$(grep -cE "^[[:space:]]*image:[[:space:]]*[\"']?${alt//./\\.}[\"']?[[:space:]]*\$" "$f")" = 1 ] || return 1
   sed -i -E "s#^([[:space:]]*image:[[:space:]]*)[\"']?${alt//./\\.}[\"']?[[:space:]]*\$#\1$neu#" "$f"
   grep -qE "^[[:space:]]*image: ${neu//./\\.}\$" "$f"
@@ -344,6 +376,7 @@ dryrun_ok() {  # nur die genannten Dienste duerfen betroffen sein, kein neues Ne
 commit_repo() {  # $1 Dienst, $2 Text
   cp "${DIR[$1]}/docker-compose.yml" "$REPO/${REPOF[$1]}"
   git -C "$REPO" add "${REPOF[$1]}"
+  if git -C "$REPO" diff --cached --quiet; then log "$1: Compose-Datei unveraendert (Neubau) – kein Commit noetig"; return; fi
   git -C "$REPO" commit -q -m "dahub-update: $2" -m "Automatisch durch dahub-update.sh, Tests gruen." \
     -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" || log "WARNUNG: Commit fehlgeschlagen"
 }
@@ -462,16 +495,67 @@ aktualisiere_nextcloud() {
   fi
 }
 
+# ------------------------------------------------------------------ Simulation (ohne pull, up, Compose-Aenderung, Commit)
+sim_dryrun() {  # $1 Compose-Schluessel (Dienst), $2 Kopie, Rest: Dienste – Dry-Run gegen die geaenderte Kopie
+  local k=$1 kopie=$2; shift 2
+  CF[$k]=$kopie
+  if dryrun_ok "$k" "$@"; then unset "CF[$k]"; sim_log "Dry-Run ok fuer $* (Kopie der Compose-Datei)"; return 0; fi
+  unset "CF[$k]"; return 1
+}
+simuliere() {
+  local n=$1 alt=${ALT[$1]} neu=${NEU[$1]} f="${DIR[$1]}/docker-compose.yml" alt_id neu_id vorher
+  log "--- $n: $alt -> $neu (${ART[$n]})"
+  vorher=$(sha256sum < "$f")
+  alt_id=$(docker inspect -f '{{.Image}}' "$n")
+  docker tag "$alt_id" "dahub-rueckfall/$n:vorher"; log "Rueckfall-Tag dahub-rueckfall/$n:vorher -> $alt_id"
+  neu_id=$(docker image inspect -f '{{.Id}}' "${IMG[$n]}:$neu" 2>/dev/null) || neu_id=""
+  sim_log "pull ${IMG[$n]}:$neu uebersprungen (lokal: ${neu_id:-nicht vorhanden})"
+  cp "$f" "$tmp/$n.sim.yml"
+  if [ "$neu" != "$alt" ]; then
+    setze_tag "$n" "$alt" "$neu" "$tmp/$n.sim.yml" || { log "$n: Tag nicht setzbar"; rot+=("$n (Compose)"); return; }
+  fi
+  if [ -z "$neu_id" ]; then  # ohne pull kennt der Dry-Run das Image nicht ("No such image"); im echten Lauf kommt er nach dem pull
+    sim_log "Dry-Run uebersprungen: ${IMG[$n]}:$neu nicht lokal (Tag-Aenderung auf der Kopie geprueft)"
+  else
+    sim_dryrun "$n" "$tmp/$n.sim.yml" "$n" || { log "$n: Dry-Run betrifft mehr als $n"; rot+=("$n (Dry-Run)"); return; }
+  fi
+  sim_log "compose up $n uebersprungen, Test gegen den laufenden Container"
+  if teste "$n"; then log "$n: Test gruen (laufend $(docker inspect -f '{{.Image}}' "$n"))"; ok+=("$n $alt→$neu (simuliert)")
+  else log "$n: Test ROT (laufender Container)"; rot+=("$n (Test rot)"); fi
+  [ "$(sha256sum < "$f")" = "$vorher" ] || { log "FEHLER: Compose-Datei von $n wurde veraendert"; rot+=("$n (Compose-Datei veraendert!)"); }
+}
+simuliere_nextcloud() {
+  local dienste=() n f="${DIR[nextcloud]}/docker-compose.yml" vorher fehlt=""
+  for n in nextcloud-db nextcloud; do [ -n "${NEU[$n]:-}" ] && dienste+=("$n"); done
+  log "--- Nextcloud: ${dienste[*]}"
+  vorher=$(sha256sum < "$f"); cp "$f" "$tmp/nextcloud.sim.yml"
+  for n in "${dienste[@]}"; do
+    docker tag "$(docker inspect -f '{{.Image}}' "$n")" "dahub-rueckfall/$n:vorher"; log "Rueckfall-Tag dahub-rueckfall/$n:vorher gesetzt"
+    docker image inspect "${IMG[$n]}:${NEU[$n]}" >/dev/null 2>&1 || fehlt+="${IMG[$n]}:${NEU[$n]} "
+    if [ "${NEU[$n]}" != "${ALT[$n]}" ]; then setze_tag "$n" "${ALT[$n]}" "${NEU[$n]}" "$tmp/nextcloud.sim.yml" || { rot+=("$n (Compose)"); return; }; fi
+  done
+  if [ -n "$fehlt" ]; then
+    sim_log "Dry-Run uebersprungen: nicht lokal: $fehlt(Tag-Aenderung auf der Kopie geprueft)"
+  else
+    sim_dryrun nextcloud "$tmp/nextcloud.sim.yml" nextcloud-db nextcloud || { log "Nextcloud: Dry-Run unerwartet"; rot+=("nextcloud (Dry-Run)"); return; }
+  fi
+  sim_log "pull, Wartungsmodus, Dump, version.php, compose up, occ upgrade uebersprungen"
+  if teste nextcloud; then log "Nextcloud: Test gruen"; for n in "${dienste[@]}"; do ok+=("$n ${ALT[$n]}→${NEU[$n]} (simuliert)"); done
+  else log "Nextcloud: Test ROT"; rot+=("nextcloud (Test rot)"); fi
+  [ "$(sha256sum < "$f")" = "$vorher" ] || { log "FEHLER: Compose-Datei von Nextcloud wurde veraendert"; rot+=("nextcloud (Compose-Datei veraendert!)"); }
+}
+
 # ------------------------------------------------------------------ Ausfuehren
 for n in "${faellig[@]}"; do
   case "$n" in nextcloud|nextcloud-db) continue ;; esac
-  aktualisiere "$n"
+  if [ "$sim" = 1 ]; then simuliere "$n"; else aktualisiere "$n"; fi
 done
 for n in "${faellig[@]}"; do
-  case "$n" in nextcloud|nextcloud-db) aktualisiere_nextcloud; break ;; esac
+  case "$n" in nextcloud|nextcloud-db) if [ "$sim" = 1 ]; then simuliere_nextcloud; else aktualisiere_nextcloud; fi; break ;; esac
 done
 
-git -C "$REPO" push -q 2>/dev/null || log "WARNUNG: git push fehlgeschlagen"
+if [ "$sim" = 1 ]; then sim_log "git push uebersprungen"
+else git -C "$REPO" push -q 2>/dev/null || log "WARNUNG: git push fehlgeschlagen"; fi
 fertig=1
 zusammen="aktualisiert: ${#ok[@]}"
 [ ${#ok[@]} -gt 0 ] && zusammen+=" (${ok[*]})"
