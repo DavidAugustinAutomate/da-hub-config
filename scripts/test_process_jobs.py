@@ -213,5 +213,25 @@ class Stufe2Jpeg(unittest.TestCase):
         self.assertEqual(store.call_args.args[4], pj.hashlib.sha256(alt).hexdigest())
 
 
+class Stufe3NameErrorNul(unittest.TestCase):
+    def test_libreoffice_fehler_ohne_nameerror(self):
+        r = mock.Mock(status_code=500, text="kaputt", content=b"")
+        with mock.patch.object(pj.requests, "request", return_value=r):
+            with self.assertRaises(RuntimeError) as cm:
+                pj.convert_legacy("http://u", "Tabelle.xls", b"x")
+        self.assertIn("LibreOffice-Fehler (500) bei .xls", str(cm.exception))
+
+    def test_nul_entfernt(self):
+        sess = mock.Mock(); sess.get.return_value = mock.Mock(status_code=200, content=b"%PDF")
+        with mock.patch.object(pj, "extract_text", return_value="Anfang\x00Mitte\x00 Ende " * 10), \
+             mock.patch.object(pj, "embed_batch", side_effect=lambda u, t: [[0.0] * 1024] * len(t)), \
+             mock.patch.object(pj, "store_document") as store:
+            info = pj.process_one({"id": 1, "origin_path": "/a.pdf", "action": "created", "old_path": None},
+                                  sess, args(), mock.MagicMock())
+        chunks = store.call_args.args[5]
+        self.assertTrue(chunks and all("\x00" not in c for c in chunks))
+        self.assertIn("NUL-Zeichen entfernt", info)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

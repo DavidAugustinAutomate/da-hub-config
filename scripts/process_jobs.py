@@ -369,7 +369,7 @@ def convert_legacy(unoserver_url, filename, content):
 
     if resp.status_code != 200:
         raise RuntimeError(
-            f"LibreOffice-Fehler ({resp.status_code}) bei {endung}: "
+            f"LibreOffice-Fehler ({resp.status_code}) bei .{rohe_endung}: "
             f"{resp.text[:200]}"
         )
 
@@ -631,6 +631,12 @@ def process_one(job, session, args, pg_conn, simulieren=False):
     hinweis = " (JFIF-Dichte korrigiert)" if dichte_korrigiert else ""
     text = extract_text(args.docling_url, args.unoserver_url, filename, content)
     heartbeat(pg_conn, job_id)  # Textextraktion geschafft (kann bis 10 Min dauern)
+
+    # Postgres-Text erlaubt kein NUL-Zeichen ("A string literal cannot contain
+    # NUL (0x00) characters", 29.09.: 3 PDFs) – im Text ohnehin bedeutungslos
+    if "\x00" in text:
+        text = text.replace("\x00", "")
+        hinweis += " (NUL-Zeichen entfernt)"
 
     chunks = chunk_text(text)
 
