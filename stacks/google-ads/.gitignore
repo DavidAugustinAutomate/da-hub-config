@@ -1,0 +1,8 @@
+# Secrets und Laufzeit nie ins Repo
+oauth-client.json
+.env
+.env.*
+venv/
+__pycache__/
+*.pyc
+*.bak-*
