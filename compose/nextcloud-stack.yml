@@ -15,7 +15,7 @@ services:
       - MYSQL_USER=${MYSQL_USER}
 
   nextcloud:
-    image: nextcloud:33.0.8
+    image: nextcloud:33.0.9
     container_name: nextcloud
     restart: always
     healthcheck:
