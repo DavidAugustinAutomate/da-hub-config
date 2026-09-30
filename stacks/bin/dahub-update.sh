@@ -402,6 +402,47 @@ commit_repo() {  # $1 Dienst, $2 Text
     -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" || log "WARNUNG: Commit fehlgeschlagen"
 }
 
+# ------------------------------------------------------------------ n8n: Sicherung des Volumes (SQLite + config)
+# n8n nutzt SQLite (database.sqlite + WAL) im Volume unter /home/node/.n8n; 'config' enthaelt den
+# Verschluesselungsschluessel -> Sicherung ist geheim (600). Konsistent nur bei gestopptem n8n.
+# Hilfscontainer = das bisherige n8n-Image (tar/sh vorhanden, nichts nachzuladen), als root.
+N8N_BEHALTEN=4
+n8n_volume() { docker inspect -f '{{range .Mounts}}{{if eq .Destination "/home/node/.n8n"}}{{.Name}}{{end}}{{end}}' n8n; }
+n8n_sichern() {  # $1 Hilfs-Image, $2 Volume, $3 Zieldatei (absolut, in $BACKUP oder $tmp)
+  local img=$1 vol=$2 ziel=$3 inhalt
+  docker run --rm -u 0 --entrypoint sh -v "$vol":/daten:ro -v "$(dirname "$ziel")":/sicherung "$img" \
+    -c 'tar -czf "/sicherung/$1" -C /daten . && chown 1000:1000 "/sicherung/$1" && chmod 600 "/sicherung/$1"' \
+    sh "$(basename "$ziel")" || return 1
+  inhalt=$(tar -tzf "$ziel" 2>/dev/null) || return 1
+  grep -qxE '\./database\.sqlite' <<<"$inhalt" && grep -qxE '\./config' <<<"$inhalt"
+}
+n8n_zurueckspielen() {  # $1 Hilfs-Image, $2 Volume, $3 Sicherung – n8n muss gestoppt sein
+  docker run --rm -u 0 --entrypoint sh -v "$2":/daten -v "$(dirname "$3")":/sicherung:ro "$1" \
+    -c 'find /daten -mindepth 1 -delete && tar -xzf "/sicherung/$1" -C /daten' sh "$(basename "$3")"
+}
+n8n_aufraeumen() {  # nur die letzten N8N_BEHALTEN Sicherungen behalten
+  ls -1t "$BACKUP"/n8n-2*.tar.gz 2>/dev/null | tail -n +$((N8N_BEHALTEN + 1)) | while read -r alt; do
+    rm -f -- "$alt"; log "alte n8n-Sicherung entfernt: $alt"; done
+}
+n8n_probe() {  # --simulieren: Sicherung OHNE Stopp nach $tmp, Wiederherstellung in ein Testvolume, SQLite pruefen
+  local img=$1 vol pv ergebnis
+  vol=$(n8n_volume); [ -n "$vol" ] || { log "n8n: Volume nicht gefunden"; return 1; }
+  pv="dahub-n8n-probe-$$"
+  n8n_sichern "$img" "$vol" "$tmp/n8n-probe.tar.gz" || { log "n8n-Probe: Sicherung fehlgeschlagen"; return 1; }
+  sim_log "n8n: Sicherung von $vol ($(du -h "$tmp/n8n-probe.tar.gz" | cut -f1)) – Probe ohne Stopp, im echten Lauf bei gestopptem n8n"
+  docker volume create "$pv" >/dev/null || return 1
+  if n8n_zurueckspielen "$img" "$pv" "$tmp/n8n-probe.tar.gz" \
+     && docker run --rm -u 0 --entrypoint sh -v "$pv":/daten:ro "$img" -c 'cat /daten/database.sqlite' > "$tmp/probe.sqlite"; then
+    ergebnis=$(sqlite3 -readonly "$tmp/probe.sqlite" 'PRAGMA integrity_check; SELECT count(*) FROM workflow_entity; SELECT count(*) FROM credentials_entity;' 2>&1 | paste -sd' ')
+  else
+    ergebnis="Wiederherstellung fehlgeschlagen"
+  fi
+  docker volume rm "$pv" >/dev/null || log "WARNUNG: Testvolume $pv nicht entfernt"
+  rm -f "$tmp/probe.sqlite" "$tmp/n8n-probe.tar.gz"
+  sim_log "n8n: Wiederherstellung in Testvolume: integrity/Workflows/Credentials = $ergebnis"
+  [[ "$ergebnis" == ok\ * ]]
+}
+
 # ------------------------------------------------------------------ ein Dienst (ausser Nextcloud)
 aktualisiere() {
   local n=$1 alt=${ALT[$1]} neu=${NEU[$1]} f="${DIR[$1]}/docker-compose.yml" alt_id neu_id
@@ -414,7 +455,17 @@ aktualisiere() {
   if [ "$neu_id" = "$alt_id" ]; then log "$n: Image unveraendert – nichts zu tun"; return; fi
   if [ "$neu" != "$alt" ]; then setze_tag "$n" "$alt" "$neu" || { log "$n: Tag nicht setzbar – uebersprungen"; cp "$tmp/$n.yml.vorher" "$f"; rot+=("$n (Compose)"); return; }; fi
   if ! dryrun_ok "$n" "$n"; then log "$n: Dry-Run betrifft mehr als $n – uebersprungen"; cp "$tmp/$n.yml.vorher" "$f"; rot+=("$n (Dry-Run)"); return; fi
-  local grund
+  local grund sicherung="" vol=""
+  if [ "$n" = n8n ]; then  # Ergaenzung a): Volume bei gestopptem n8n sichern
+    vol=$(n8n_volume); sicherung=$BACKUP/n8n-$(date +%Y%m%d-%H%M%S).tar.gz
+    mkdir -p "$BACKUP"; chmod 700 "$BACKUP"
+    compose "$n" stop "$n" >/dev/null 2>&1
+    if [ -z "$vol" ] || ! n8n_sichern "$alt_id" "$vol" "$sicherung"; then
+      rm -f "$sicherung"; cp "$tmp/$n.yml.vorher" "$f"; docker start n8n >/dev/null
+      log "n8n: Sicherung fehlgeschlagen – nichts veraendert, n8n wieder gestartet"; rot+=("n8n (Sicherung)"); return
+    fi
+    log "n8n: Sicherung $sicherung ($(du -h "$sicherung" | cut -f1))"; n8n_aufraeumen
+  fi
   if compose "$n" up -d --no-deps "$n"; then
     if teste "$n"; then
       log "$n: Test gruen ($(docker inspect -f '{{.Image}}' "$n"))"
@@ -429,6 +480,11 @@ aktualisiere() {
   log "$n: $grund – Rueckfall auf $alt ($alt_id)"
   cp "$tmp/$n.yml.vorher" "$f"
   docker tag "$alt_id" "${IMG[$n]}:$alt"          # bei Neubau zeigt der Tag sonst auf das neue Image
+  if [ -n "$sicherung" ]; then  # n8n: Datenstand von vor dem Update zurueck (neue Version kann migriert haben)
+    compose "$n" stop "$n" >/dev/null 2>&1
+    if n8n_zurueckspielen "$alt_id" "$vol" "$sicherung"; then log "n8n: Volume aus $sicherung zurueckgespielt"
+    else log "n8n: ZURUECKSPIELEN FEHLGESCHLAGEN ($sicherung)"; fi
+  fi
   if compose "$n" up -d --no-deps "$n" && teste "$n"; then
     zurueck+=("$n ($neu: $grund, zurueck auf $alt)")
     melden "da-hub: Update zurueckgenommen" "$n $neu: $grund. Zurueck auf $alt, Test wieder gruen." high
@@ -539,6 +595,9 @@ simuliere() {
     sim_log "Dry-Run uebersprungen: ${IMG[$n]}:$neu nicht lokal (Tag-Aenderung auf der Kopie geprueft)"
   else
     sim_dryrun "$n" "$tmp/$n.sim.yml" "$n" || { log "$n: Dry-Run betrifft mehr als $n"; rot+=("$n (Dry-Run)"); return; }
+  fi
+  if [ "$n" = n8n ]; then
+    n8n_probe "$alt_id" || { log "n8n: Sicherungs-Probe rot"; rot+=("n8n (Sicherung)"); return; }
   fi
   sim_log "compose up $n uebersprungen, Test gegen den laufenden Container"
   if teste "$n"; then log "$n: Test gruen (laufend $(docker inspect -f '{{.Image}}' "$n"))"; ok+=("$n $alt→$neu (simuliert)")

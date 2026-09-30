@@ -11,7 +11,8 @@ STATE=$HOME/.local/state
 ERG=$STATE/dahub-update-ergebnis-auto
 STAND=$STATE/dahub-wochenbilanz.stand
 NOTIFY=$HOME/scripts/notify.sh
-UPDATE=$HOME/stacks/bin/dahub-update.sh
+BIN_DIR=$HOME/stacks/bin
+UPDATE=$BIN_DIR/dahub-update.sh
 MAX_ALTER=$((48 * 3600))          # Sonntag 03:30 -> Montag 08:05 = rund 29 h
 MAX_ATTEMPTS=3                    # wie check-index-fehler.sh
 
@@ -87,6 +88,41 @@ if tab=$("$UPDATE" --pruefen --gruppe freigabe 2>&1); then
 else
   zeilen+=("Freigabe: Pruefung fehlgeschlagen"); warnung
 fi
+
+# ------------------------------------------------------------------ 5 Hauptversionen der Gruppe auto (nur Hinweis, kein Knopf)
+# Die Linien in dienste.conf halten die Gruppe auto innerhalb ihrer Hauptversion; ein Sprung
+# (erste Versionszahl) wird hier nur gemeldet und bleibt eine bewusste Entscheidung von Hand.
+haupt=$(python3 - "$BIN_DIR/dienste.conf" "$BIN_DIR/neue-version.py" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+conf, nv = sys.argv[1], sys.argv[2]
+hinweise = []
+for zeile in open(conf, encoding="utf-8"):
+    t = zeile.split()
+    if len(t) < 5 or t[0].startswith("#") or t[4] != "auto" or t[1] == "-":
+        continue
+    dienst, image = t[0], t[2]
+    try:
+        cfg = subprocess.run(["docker", "inspect", "-f", "{{.Config.Image}}", dienst], capture_output=True, text=True, timeout=30).stdout.strip()
+    except Exception:
+        continue
+    tag = cfg.rsplit(":", 1)[1] if ":" in cfg.split("/")[-1] else ""
+    m = re.fullmatch(r"(v?)(\d+)\.\d+\.\d+", tag)
+    if not m:
+        continue  # z. B. libreoffice 3.19: keine dreiteilige Version
+    praefix, major = m.group(1), int(m.group(2))
+    linie = "^" + re.escape(praefix) + r"(?!" + str(major) + r"\.)\d+\.\d+\.\d+$"
+    try:
+        aus = subprocess.run(["python3", nv, image, tag, linie, "0", ""], capture_output=True, text=True, timeout=300).stdout
+        d = json.loads(aus)
+    except Exception:
+        continue
+    neu = d.get("neu")
+    if neu and int(re.match(r"v?(\d+)", neu).group(1)) > major:
+        hinweise.append(f"{dienst} {tag} -> {neu}")
+print("; ".join(hinweise))
+PY
+)
+[ -n "$haupt" ] && zeilen+=("Hauptversion verfuegbar (nur Hinweis, von Hand): $haupt")
 
 # ------------------------------------------------------------------ Meldung
 text=$(printf '%s\n' "${zeilen[@]}")

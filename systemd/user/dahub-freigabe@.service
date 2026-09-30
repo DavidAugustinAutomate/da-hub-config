@@ -1,0 +1,8 @@
+[Unit]
+Description=da-hub: Update-Freigabe fuer Angebot %i (Knopf «Einspielen»)
+
+[Service]
+Type=oneshot
+ExecStart=/home/david/stacks/bin/dahub-freigabe.sh %i
+# Simulation (inkl. Warten auf den Worker, max. 70 min) + echter Lauf
+TimeoutStartSec=3h

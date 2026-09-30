@@ -33,8 +33,10 @@ import argparse
 import inspect
 import json
 import logging
+import os
 import re
 import smtplib
+import subprocess
 import sys
 import threading
 import time
@@ -277,6 +279,31 @@ CREATE TABLE IF NOT EXISTS agent_journal (
     messages   INT NOT NULL,
     written_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Freigabe-Knopf für Container-Updates (Phase 4). Angebote legt check-versionen.py an;
+-- gleiche Definition wie ~/scripts/update_angebote.sql.
+CREATE TABLE IF NOT EXISTS update_angebote (
+    id               BIGSERIAL PRIMARY KEY,
+    dienst           TEXT NOT NULL CHECK (dienst IN ('n8n', 'litellm')),
+    version_alt      TEXT NOT NULL,
+    version_neu      TEXT NOT NULL CHECK (version_neu ~ '^v?[0-9]+\\.[0-9]+\\.[0-9]+$'),
+    release_url      TEXT,
+    release_datum    TIMESTAMPTZ,
+    zusammenfassung  TEXT,
+    status           TEXT NOT NULL DEFAULT 'neu' CHECK (status IN (
+                         'neu', 'offen', 'laeuft', 'erledigt', 'fehler', 'simulation_rot',
+                         'spaeter', 'uebersprungen', 'ersetzt')),
+    ersetzt_durch    BIGINT REFERENCES update_angebote(id),
+    erinnern_ab      TIMESTAMPTZ,
+    message_id       BIGINT,
+    laeuft_seit      TIMESTAMPTZ,
+    ergebnis         TEXT,
+    gemeldet         BOOLEAN NOT NULL DEFAULT true,
+    erstellt         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    aktualisiert     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (dienst, version_neu)
+);
+CREATE INDEX IF NOT EXISTS update_angebote_status_idx ON update_angebote (status);
 """
 
 
@@ -1161,6 +1188,191 @@ def handle_message(tg, msg):
     tg.send(chat_id, answer)
 
 
+# ---------------------------------------------------------------------------
+# Freigabe-Knopf für Container-Updates (Phase 4)
+#
+# Angebote legt check-versionen.py in update_angebote an (status 'neu'). Diese
+# Schleife schickt sie mit drei Knöpfen in den Chat und meldet Ergebnisse.
+# Der Knopf trägt NUR die Angebots-ID; Dienst und Version liest die Unit
+# dahub-freigabe@<id>.service selbst aus der Datenbank. Der Ablauf ist fester
+# Code und kein Werkzeug des Modells – das LLM kann kein Update auslösen.
+# ---------------------------------------------------------------------------
+
+UPDATE_UNIT = "dahub-freigabe@{}.service"
+UPDATE_ERINNERUNG = timedelta(days=3)
+DIENST_NAMEN = {"n8n": "n8n", "litellm": "LiteLLM"}
+ANGEBOT_ERGEBNIS = {
+    "erledigt": "Update eingespielt",
+    "fehler": "Update fehlgeschlagen",
+    "simulation_rot": "Simulation rot – kein echter Lauf",
+}
+
+
+def angebot_text(a):
+    name = DIENST_NAMEN.get(a["dienst"], a["dienst"])
+    kopf = f"Update verfügbar: {name} {a['version_alt']} → {a['version_neu']}"
+    if a.get("release_datum"):
+        tage = (datetime.now(TZ) - a["release_datum"]).days
+        kopf += f"\nveröffentlicht {a['release_datum'].astimezone(TZ):%d.%m.%Y} ({tage} Tage)"
+    return (f"{kopf}\n\n{a.get('zusammenfassung') or 'Kurzfassung nicht verfügbar.'}\n\n"
+            f"Vollständige Notes: {a.get('release_url') or '-'}")
+
+
+def angebot_knoepfe(aid):
+    return {"inline_keyboard": [[
+        {"text": "Einspielen", "callback_data": f"upd:{aid}:e"},
+        {"text": "Später", "callback_data": f"upd:{aid}:s"},
+        {"text": "Überspringen", "callback_data": f"upd:{aid}:x"},
+    ]]}
+
+
+def update_unit_starten(aid):
+    """Startet die User-Unit für genau dieses Angebot. Feste Befehlsliste, keine
+    Shell; aid ist eine geprüfte Ganzzahl. -> (ok, meldung)"""
+    aid = int(aid)
+    env = dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{os.getuid()}")
+    try:
+        r = subprocess.run(["systemctl", "--user", "start", "--no-block", UPDATE_UNIT.format(aid)],
+                           env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, type(e).__name__
+    return r.returncode == 0, (r.stderr or r.stdout).strip()[:200]
+
+
+def angebote_bearbeiten(tg):
+    chat = CFG["ALLOWED_CHAT_ID"]
+    with db() as cur:
+        # Ergänzung b): länger als 3 h 'laeuft' -> Fehler (die Unit hat selbst TimeoutStartSec=3h)
+        cur.execute(
+            """UPDATE update_angebote
+               SET status = 'fehler', gemeldet = false, aktualisiert = now(),
+                   ergebnis = 'Lauf dauerte länger als 3 Stunden – als Fehler gewertet. Log: ~/.local/state/dahub-update.log'
+               WHERE status = 'laeuft' AND laeuft_seit < now() - interval '3 hours'""")
+        cur.execute(
+            """SELECT a.*, b.version_neu AS ersetzt_durch_version
+               FROM update_angebote a LEFT JOIN update_angebote b ON b.id = a.ersetzt_durch
+               WHERE a.status = 'neu'
+                  OR (a.status = 'spaeter' AND a.erinnern_ab <= now())
+                  OR (NOT a.gemeldet AND a.status IN ('offen', 'ersetzt', 'erledigt', 'fehler', 'simulation_rot'))
+               ORDER BY a.id""")
+        faellig = cur.fetchall()
+    for a in faellig:
+        angebot_melden(tg, chat, a)
+
+
+def angebot_melden(tg, chat, a):
+    st = a["status"]
+    if st in ("neu", "spaeter", "offen"):
+        # neu: erstes Angebot · spaeter: Erinnerung · offen+ergebnis: z. B. «anderer Lauf aktiv»
+        vorspann = {"spaeter": "Erinnerung (vor 3 Tagen auf «Später» gesetzt):\n\n"}.get(st, "")
+        if st == "offen" and a.get("ergebnis"):
+            vorspann = a["ergebnis"] + "\n\n"
+        res = tg.send(chat, vorspann + angebot_text(a), reply_markup=angebot_knoepfe(a["id"]))
+        with db() as cur:  # message_id der NEUEN Nachricht: nur ihre Knöpfe gelten
+            cur.execute(
+                """UPDATE update_angebote
+                   SET status = 'offen', message_id = %s, gemeldet = true, ergebnis = NULL,
+                       erinnern_ab = NULL, aktualisiert = now()
+                   WHERE id = %s AND status = %s""",
+                (res["message_id"], a["id"], st))
+        log.info("Update-Angebot #%s gesendet (%s)", a["id"], st)
+        return
+    if st == "ersetzt":
+        if a.get("message_id"):
+            try:
+                tg.call("editMessageText", chat_id=chat, message_id=a["message_id"],
+                        text=angebot_text(a) + f"\n\n— ersetzt durch {a.get('ersetzt_durch_version') or 'neuere Version'} —",
+                        link_preview_options={"is_disabled": True})
+            except Exception as e:  # Nachricht zu alt/gelöscht: Knöpfe wirken trotzdem nicht mehr
+                log.warning("Angebot #%s: ersetzt-Markierung nicht möglich: %s", a["id"], e)
+    else:
+        name = DIENST_NAMEN.get(a["dienst"], a["dienst"])
+        tg.send(chat, f"{ANGEBOT_ERGEBNIS[st]}: {name} {a['version_alt']} → {a['version_neu']}\n"
+                      f"{a.get('ergebnis') or ''}".strip())
+    with db() as cur:
+        cur.execute("UPDATE update_angebote SET gemeldet = true WHERE id = %s AND status = %s",
+                    (a["id"], st))
+    log.info("Update-Angebot #%s: %s gemeldet", a["id"], st)
+
+
+def angebote_loop(tg, stop):
+    while not stop.is_set():
+        try:
+            angebote_bearbeiten(tg)
+        except Exception:
+            log.exception("Angebots-Schleife")
+        stop.wait(30)
+
+
+def handle_update_callback(tg, cq, msg, chat_id, toast):
+    m = re.fullmatch(r"upd:(\d{1,12}):([esx])", cq.get("data") or "")
+    if not m:
+        toast("Unbekannte Aktion")
+        return
+    aid, akt = int(m.group(1)), m.group(2)
+    mid = msg.get("message_id")
+
+    def knoepfe_weg():
+        try:
+            tg.call("editMessageReplyMarkup", chat_id=chat_id, message_id=mid,
+                    reply_markup={"inline_keyboard": []})
+        except Exception:
+            pass
+
+    # Atomarer Übergang nur aus 'offen' UND nur für die zuletzt gesendete Nachricht:
+    # doppeltes Tippen oder ein alter Knopf ändern nichts.
+    sql = {
+        "e": "status = 'laeuft', laeuft_seit = now()",
+        "s": "status = 'spaeter', erinnern_ab = now() + %s",
+        "x": "status = 'uebersprungen'",
+    }[akt]
+    parameter = ((UPDATE_ERINNERUNG,) if akt == "s" else ()) + (aid, mid)
+    with db() as cur:
+        cur.execute(
+            f"""UPDATE update_angebote SET {sql}, aktualisiert = now()
+                WHERE id = %s AND status = 'offen' AND message_id = %s
+                RETURNING dienst, version_alt, version_neu""", parameter)
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(
+                """SELECT a.status, b.version_neu AS nach FROM update_angebote a
+                   LEFT JOIN update_angebote b ON b.id = a.ersetzt_durch WHERE a.id = %s""", (aid,))
+            ist = cur.fetchone()
+    if row is None:
+        knoepfe_weg()
+        grund = {"laeuft": "Läuft bereits", "erledigt": "Bereits erledigt", "uebersprungen": "Übersprungen",
+                 "spaeter": "Auf später gesetzt", "fehler": "Bereits abgeschlossen (Fehler)",
+                 "simulation_rot": "Bereits abgeschlossen (Simulation rot)"}
+        if ist and ist["status"] == "ersetzt":
+            toast(f"Ersetzt durch {ist['nach'] or 'neuere Version'}")
+        else:
+            toast(grund.get(ist["status"], "Nicht mehr gültig") if ist else "Unbekanntes Angebot")
+        return
+
+    knoepfe_weg()
+    name = DIENST_NAMEN.get(row["dienst"], row["dienst"])
+    if akt == "s":
+        toast("Erinnerung in 3 Tagen")
+        return
+    if akt == "x":
+        toast("Übersprungen")
+        tg.send(chat_id, f"{name} {row['version_neu']} übersprungen. Erst eine neuere Version wird wieder angeboten.")
+        return
+    ok, meldung = update_unit_starten(aid)
+    if not ok:
+        with db() as cur:
+            cur.execute("""UPDATE update_angebote SET status = 'offen', laeuft_seit = NULL, gemeldet = false,
+                           ergebnis = %s, aktualisiert = now() WHERE id = %s AND status = 'laeuft'""",
+                        (f"Start der Update-Unit fehlgeschlagen ({redact(meldung)[:120]}).", aid))
+        toast("Start fehlgeschlagen")
+        log.error("Angebot #%s: Unit-Start fehlgeschlagen: %s", aid, meldung)
+        return
+    toast("Gestartet")
+    log.info("Angebot #%s: Einspielen gestartet (%s %s)", aid, row["dienst"], row["version_neu"])
+    tg.send(chat_id, f"Einspielen gestartet: {name} {row['version_alt']} → {row['version_neu']}.\n"
+                     f"Zuerst Simulation, bei Grün der echte Lauf. Das Ergebnis folgt hier.")
+
+
 def strip_buttons(markup, pid):
     rows = (markup or {}).get("inline_keyboard", [])
     rows = [[b for b in row if not str(b.get("callback_data", "")).endswith(":" + pid)] for row in rows]
@@ -1181,6 +1393,9 @@ def handle_callback(tg, cq):
         except Exception:
             pass
 
+    if action == "upd":
+        handle_update_callback(tg, cq, msg, chat_id, toast)
+        return
     if action not in ("ok", "no") or not pid:
         toast("Unbekannte Aktion")
         return
@@ -1578,6 +1793,7 @@ def main():
 
     stop = threading.Event()
     threading.Thread(target=reminder_loop, args=(tg, stop), daemon=True).start()
+    threading.Thread(target=angebote_loop, args=(tg, stop), daemon=True).start()
     log.info("da-agent gestartet als @%s, Modell %s, Mail %s, Gedächtnis %s", me, CFG["AGENT_MODEL"],
              "aktiv" if smtp_configured() else "aus", "aktiv" if nc_enabled() else "aus")
     poll_loop(tg)
