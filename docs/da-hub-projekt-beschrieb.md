@@ -413,13 +413,13 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
 
 ### Aus Phase 1 (27.09.2026)
 
-A. ~~Nextcloud-Übernahme (Stack 2)~~ **vollständig erledigt** (28.09. Übernahme; 30.09. n8n-Credential «NextCloud account» von David mit «Test» geprüft: in Ordnung; Funnel von aussen noch offen) (siehe Änderungsprotokoll 28.09.). Offen daraus nur noch: n8n-Credential «NextCloud account» einmal von Hand mit «Test» prüfen; Funnel einmal von aussen (Mobilnetz) aufrufen
+A. ~~Nextcloud-Übernahme (Stack 2)~~ **erledigt**: Übernahme 28.09. (siehe Änderungsprotokoll 28.09.); Funnel von aussen am 28.09. von David bestätigt; n8n-Credential «NextCloud account» am 30.09. von David mit «Test» geprüft: in Ordnung
 B. **LAN-Erreichbarkeit der Ports 5678 (n8n), 8080 (nextcloud), 3000 (gotenberg) und 9092 (ntfy) prüfen.** Alle vier sind auf 0.0.0.0 gebunden; Docker umgeht ufw häufig. Tailscale Serve/Funnel zeigen auf `localhost`/`127.0.0.1`, eine Bindung auf `127.0.0.1` würde genügen
-C. Nextcloud 33.0.9 verfügbar – erster Anwendungsfall für `dahub-update.sh` (Phase 2)
+C. ~~Nextcloud 33.0.9 verfügbar~~ **erledigt 30.09.2026**: mit `dahub-update.sh --dienst nextcloud --version 33.0.9` begleitet eingespielt (Simulation vorher grün, Wartungsmodus 23 s, Commit `b0ebc3e`; siehe Änderungsprotokoll 30.09.)
 D. ~~Nextcloud-Hintergrundjobs auf Cron umstellen~~ **erledigt 28.09.2026** (`nextcloud-cron.timer`, Modus `cron`, siehe Änderungsprotokoll)
 E. Nicht mehr benötigte Images (gotenberg `:8` = 8.37.0, docling/ollama `:latest`, `mariadb:11.4`, `nextcloud:33`) und die verwaisten Objekte Netz `6_default` sowie Volume `portainer` erst nach Abschluss von Phase 1 und nur mit Freigabe entfernen. Seit 28.09. zusätzlich: gestoppter Container `watchtower` + Image `nickfedor/watchtower`, sobald feststeht, dass er nicht mehr gebraucht wird
 F. Portainer-Einträge 1, 2, 3, 5, 6: stehen lassen, nicht mehr darüber deployen (würden `:latest`/`:8` ziehen). Entfernen erst, wenn geklärt ist, ob dabei Container gestoppt werden
-G. **Endgültig gescheiterte Indexierungen steigen stark:** laut täglicher Fehlermeldung **587 (20.09.) → 1'106 (28.09.) in 8 Tagen**, rund 65 pro Tag (`file_jobs.failed` 597 am 15.09., 1'072 am 27.09.). Blieb unbemerkt, weil die Meldungen seit 21.09. nicht zugestellt wurden (Punkt K). Die «neu»-Zahl der Meldung summiert sich seither auf (523 am 28.09.), weil die IDs nur nach erfolgreichem Versand gemerkt werden. Ursache (Fehlertypen) vordringlich untersuchen; mit dem Rückholen (Punkt 1) zusammen anschauen
+G. **Endgültig gescheiterte Indexierungen:** Stand **30.09.2026: 1'197** (29.09.: 1'194; +3 seither, siehe R). Der Anstieg **587 (20.09.) → 1'106 (28.09.)**, rund 65 pro Tag, kam aus dem Bereich der Mail-Anhänge (v. a. jpg mit JFIF-Dichte 0) und einem docling-Ausfall; die Wege sind in den Worker-Stufen 1–6 umgesetzt (Änderungsprotokolle 29.09. und 30.09.), die bestehenden Fälle werden nach Abarbeitung des Rückstands zurückgesetzt. Seit Stufe 1–6 im vollständigen Lauf 0 neue endgültige Fehler. Früherer Befund: Blieb unbemerkt, weil die Meldungen seit 21.09. nicht zugestellt wurden (Punkt K). Die «neu»-Zahl der Meldung summiert sich seither auf (523 am 28.09.), weil die IDs nur nach erfolgreichem Versand gemerkt werden. Ursache (Fehlertypen) vordringlich untersuchen; mit dem Rückholen (Punkt 1) zusammen anschauen
    - **Grundsatz (David, 29.09.): Kein Job geht verloren.** Jede Fehlerklasse braucht einen Weg, auf dem die Datei am Ende doch indexiert wird. **Alle übrigen gescheiterten Jobs werden nach Abarbeitung des Rückstands erneut versucht** (`attempts=0`), jeweils nachdem der Weg für ihre Klasse umgesetzt ist
    - **Auswertung 29.09. (nur lesend), 1'194 endgültig gescheitert.** Knick am 22.09.: vorher 2–8 pro Tag, danach 45–101 – nicht zeitlich, sondern weil der Worker (arbeitet nach aufsteigender ID) den Bereich der Mail-Anhänge aus den PSTs erreichte (ID ≥ 80'000). Keine Zeitspalte für Fehlschläge; Trennung alt/neu über die Reihenfolge in `dahub-index-fehler.ids` (Zeilen 1–587 bis 21.09.)
 
@@ -485,6 +485,12 @@ Q. **Kurzfassung des Angebots prüfen:** Angebot #1 (n8n 2.40.5) hatte nur 2 sta
 R. **Drei neu endgültig gescheiterte Jobs (29.09. → 30.09.: 1'194 → 1'197):**
    - 177561 (pdf) und 188544 (pdf): Read timeout 600 s (Klasse 5, grosse PDF). Weg: asynchrone docling-Schnittstelle mit langer Frist oder PDF in Teilen umwandeln, danach zurücksetzen. Hinweis: am 30.09. liefen parallel mehrere Simulationen gegen docling, das kann zum Zeitlimit beigetragen haben (188544 nach 08:00)
    - 181179 (jpg): «Could not load image», aber **JFIF-Dichte 300 dpi**, vollständig – neue Unterklasse, von Stufe 2 nicht erfasst. Weg: Bild vor docling neu kodieren (z. B. PNG mit Pillow; Debian-Paket `python3-pil`, sudo); hilft das nicht: ohne Text indexieren wie verschlüsselte Dateien
+S. **Abschluss des Aufsetzens** – gilt erst, wenn ohne Eingriff funktioniert haben:
+   - Sonntagslauf `dahub-update.timer` am **04.10.** (03:30)
+   - erste Montagsbilanz am **05.10.** (08:05, mit Neustart-/Paket-Hinweisen)
+   - LiteLLM-Angebot am **05.10.** (nach `versions-check.timer` 08:15) als erster Knopf **ohne Begleitung**
+   - DNS-Kontrolle aus K nach der nächsten automatischen Lease-Erneuerung
+T. **Künftige Updates von Docker und containerd** über den Freigabe-Knopf im Wartungsfenster mit Worker-Pause und Tests (Erweiterung von Phase 4 auf Host-Pakete, noch zu bauen); **Tailscale von Hand**, wenn David zu Hause ist (tailscaled-Neustart trennt SSH über Tailscale)
 L. **Repo-Stände der Skripte gegen den Server abgleichen:** `check-container.sh` und `notify.sh` lagen im Repo noch in der Fassung vor dem 09.09. (am 28.09. nachgeführt). Übrige Skripte in `scripts/` und Units in `systemd/` einmal mit `diff` gegen den Server prüfen
 
 ### Bisherige
