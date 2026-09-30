@@ -2,7 +2,7 @@ name: n8n
 
 services:
   n8n:
-    image: docker.n8n.io/n8nio/n8n:2.37.10
+    image: docker.n8n.io/n8nio/n8n:2.40.5
     container_name: n8n
     restart: always
     healthcheck:
