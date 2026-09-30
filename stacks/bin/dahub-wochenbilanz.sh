@@ -89,6 +89,34 @@ else
   zeilen+=("Freigabe: Pruefung fehlgeschlagen"); warnung
 fi
 
+# ------------------------------------------------------------------ 4b Neustart und offene Pakete (ohne sudo)
+REBOOT_DATEI=${DAHUB_REBOOT_DATEI:-/var/run/reboot-required}
+if [ -e "$REBOOT_DATEI" ]; then
+  laufend=$(uname -r)
+  installiert=$(ls -1 /lib/modules 2>/dev/null | sort -V | tail -n 1)
+  seit=$(date -r "$REBOOT_DATEI" '+%d.%m.%Y %H:%M')
+  zeilen+=("Neustart ausstehend seit $seit, Kernel laufend $laufend, installiert ${installiert:-?}")
+fi
+pakete=$(LC_ALL=C apt list --upgradable 2>/dev/null | python3 -c '   # LC_ALL=C: Server ist deutsch ("aktualisierbar von")
+import collections, sys
+z = collections.Counter()
+for zeile in sys.stdin:
+    if "/" not in zeile or "upgradable" not in zeile:
+        continue
+    name, rest = zeile.split("/", 1)
+    quellen = rest.split(" ", 1)[0]
+    if name.startswith(("docker-", "containerd")):
+        z["Docker"] += 1
+    elif name.startswith("tailscale"):
+        z["Tailscale"] += 1
+    elif "-security" in quellen:
+        z["Debian-Sicherheit"] += 1
+    else:
+        z["Debian"] += 1
+reihe = ["Debian-Sicherheit", "Debian", "Docker", "Tailscale"]
+print(", ".join(f"{k} {z[k]}" for k in reihe if z[k]))' 2>/dev/null)
+[ -n "$pakete" ] && zeilen+=("Offene Paket-Aktualisierungen: $pakete")
+
 # ------------------------------------------------------------------ 5 Hauptversionen der Gruppe auto (nur Hinweis, kein Knopf)
 # Die Linien in dienste.conf halten die Gruppe auto innerhalb ihrer Hauptversion; ein Sprung
 # (erste Versionszahl) wird hier nur gemeldet und bleibt eine bewusste Entscheidung von Hand.

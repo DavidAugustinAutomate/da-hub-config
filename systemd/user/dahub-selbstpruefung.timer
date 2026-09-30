@@ -1,0 +1,9 @@
+[Unit]
+Description=da-hub: Selbstpruefung 10 Minuten nach jedem Neustart (auch nach Stromausfall)
+
+[Timer]
+OnBootSec=10min
+Unit=dahub-selbstpruefung.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=da-hub: Selbstpruefung nach dem Neustart (Tests, Container, Timer, DNS, Kernel)
+
+[Service]
+Type=oneshot
+ExecStart=/home/david/stacks/bin/dahub-selbstpruefung.sh
+# Funktionstests warten je bis 3 min auf startende Container
+TimeoutStartSec=45min

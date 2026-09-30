@@ -4,6 +4,7 @@
 #   dahub-update.sh --pruefen [--gruppe auto|freigabe | --dienst NAME]   zeigt nur, was geschehen wuerde
 #   dahub-update.sh --gruppe auto                                        aktualisiert alle faelligen Dienste der Gruppe
 #   dahub-update.sh --dienst NAME [--version TAG]                        ein Dienst; --version fuer Freigabe/Major
+#   dahub-update.sh --tests                                              alle Funktionstests einmal (Selbstpruefung)
 #   --still                                                              keine Meldung bei Erfolg/nichts faellig (Timer)
 #   --simulieren                                                         ganzer Ablauf (Sperre, Flag, Warten, Rueckfall-Tags,
 #                                                                        Dry-Run, Tests) ohne pull/up/Compose-Aenderung/Commit/ntfy
@@ -41,18 +42,19 @@ modus=update; gruppe=""; dienst=""; version=""; still=0; sim=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --pruefen) modus=pruefen ;;
+    --tests) modus=tests ;;
     --still) still=1 ;;
     --simulieren) sim=1 ;;
     --ollama-referenz) modus=referenz ;;
     --gruppe) gruppe=${2:?}; shift ;;
     --dienst) dienst=${2:?}; shift ;;
     --version) version=${2:?}; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $1"; exit 2 ;;
   esac
   shift
 done
-[ "$modus" = referenz ] || [ -n "$gruppe" ] || [ -n "$dienst" ] || { echo "--gruppe oder --dienst angeben"; exit 2; }
+[ "$modus" = referenz ] || [ "$modus" = tests ] || [ -n "$gruppe" ] || [ -n "$dienst" ] || { echo "--gruppe oder --dienst angeben"; exit 2; }
 [ -z "$version" ] || [ -n "$dienst" ] || { echo "--version nur zusammen mit --dienst"; exit 2; }
 [ "$sim" = 0 ] || [ "$modus" = update ] || { echo "--simulieren nicht zusammen mit --pruefen/--ollama-referenz"; exit 2; }
 
@@ -85,7 +87,7 @@ for n in "${REIHE[@]}"; do
   if [ -n "$dienst" ]; then [ "$n" = "$dienst" ] && auswahl+=("$n")
   elif [ "${GRUPPE[$n]}" = "$gruppe" ]; then auswahl+=("$n"); fi
 done
-[ "$modus" = referenz ] || [ ${#auswahl[@]} -gt 0 ] || { echo "Kein Dienst gefunden (${dienst:-Gruppe $gruppe})"; exit 2; }
+[ "$modus" = referenz ] || [ "$modus" = tests ] || [ ${#auswahl[@]} -gt 0 ] || { echo "Kein Dienst gefunden (${dienst:-Gruppe $gruppe})"; exit 2; }
 
 declare -A CF   # abweichende Compose-Datei pro Dienst (--simulieren: geaenderte Kopie in $tmp)
 compose() { docker compose --project-directory "${DIR[$1]}" -f "${CF[$1]:-${DIR[$1]}/docker-compose.yml}" "${@:2}"; }
@@ -229,6 +231,20 @@ teste() {  # $1 Dienst: Test mit Wartezeit (Container braucht Zeit zum Starten)
   for i in $(seq 1 18); do "$f" && return 0; sleep 10; done
   return 1
 }
+
+# ------------------------------------------------------------------ --tests: alle Funktionstests einmal (Selbstpruefung)
+# Jeder Test genau einmal (nextcloud/nextcloud-db teilen t_nextcloud), mit der Wartezeit aus teste()
+# fuer Container, die gerade erst starten. Ausgabe je Test 'OK'/'ROT'; rc 0 = alle gruen.
+if [ "$modus" = tests ]; then
+  declare -A GETESTET; alle_gruen=0
+  for n in "${REIHE[@]}"; do
+    f=${TEST[$n]}; [ -n "${GETESTET[$f]:-}" ] && continue; GETESTET[$f]=1
+    if teste "$n" >/dev/null 2>&1; then printf '%-15s %s
+' "$f" OK; else printf '%-15s %s
+' "$f" ROT; alle_gruen=1; fi
+  done
+  rm -rf "$tmp"; exit "$alle_gruen"
+fi
 
 # ------------------------------------------------------------------ Ollama-Referenz einmalig anlegen
 if [ "$modus" = referenz ]; then
