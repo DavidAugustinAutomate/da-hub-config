@@ -1,6 +1,6 @@
 # Projekt-Beschrieb: Automatisierungshub «da-hub»
 
-*Kontextdokument für künftige Chats. Stand: 29.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
+*Kontextdokument für künftige Chats. Stand: 30.09.2026. Ersetzt den Beschrieb vom 15.09.2026.*
 *Punkte mit «(unbestätigt)» stammen aus älteren Sessions und wurden seither nicht erneut geprüft.*
 
 ---
@@ -48,8 +48,8 @@ Roter Faden: wiederkehrende Aufgaben automatisieren, primär rund um Dokumente u
 | Cockpit | `https://100.93.33.0:9090` | Server-Verwaltung |
 | Portainer | `https://100.93.33.0:9443` | Nur noch Anzeige; Stacks 1, 2, 3, 5, 6 sind nach `~/stacks/` übernommen, Stack 4 (Watchtower) ist gestoppt (Einträge stehen noch, **nicht mehr darüber deployen**). Container selbst von Hand gestartet; Updates von Hand, `dahub-update.sh --pruefen` meldet Neubauten von `latest` |
 | LiteLLM-Gateway | `http://100.93.33.0:4000` | v1.85.0 gepinnt, ohne Datenbank; Compose in `~/litellm/` |
-| n8n | `https://da-hub.taile9dad7.ts.net:8443` | v2.37.10, Tailscale Serve → `localhost:5678`; Host-Port `5678` auf 0.0.0.0 |
-| Nextcloud + MariaDB | `https://da-hub.taile9dad7.ts.net` | v33.0.8 (33.0.9 verfügbar), MariaDB 11.4.13; Tailscale Funnel → `127.0.0.1:8080`, 2FA; Host-Port `8080` auf 0.0.0.0 |
+| n8n | `https://da-hub.taile9dad7.ts.net:8443` | **v2.40.5** (30.09. per Freigabe-Knopf), Tailscale Serve → `localhost:5678`; Host-Port `5678` auf 0.0.0.0 |
+| Nextcloud + MariaDB | `https://da-hub.taile9dad7.ts.net` | **v33.0.9** (30.09., begleitet), MariaDB 11.4.13; Tailscale Funnel → `127.0.0.1:8080`, 2FA; Host-Port `8080` auf 0.0.0.0 |
 | ntfy | `:10000` | v2.28.0; Tailscale Serve `:10000` und `:8443/ntfy` → `localhost:9092` (Host-Port **9092**) |
 | PostgreSQL + pgvector | `100.93.33.0:5432` | PostgreSQL 16.15, pgvector 0.8.6; Container `postgres-vector`, DB `knowledge`, User `dahub` |
 | Ollama | `100.93.33.0:11434` | v0.33.3; Embedding-Modell `bge-m3` (1024 Dimensionen) |
@@ -68,9 +68,9 @@ Container mit `restart: always`.
 | `~/stacks/gotenberg/` | `gotenberg` | gotenberg | `gotenberg/gotenberg:8.37.0` (seit 28.09. per `dahub-update.sh`) | – |
 | `~/stacks/ntfy/` | `ntfy` | ntfy | `binwiederhier/ntfy:v2.28.0` | – |
 | `~/stacks/wissensdatenbank/` | `wissensdatenbank` | postgres-vector, docling, ollama, libreoffice | `pgvector/pgvector:pg16`, `docling-serve:v1.32.0`, `ollama/ollama:0.33.3`, `libreoffice-unoserver:3.19` | `.env` (600): `PG_VECTOR_PASSWORD` |
-| `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.37.10` | `.env` (600): alle 9 Variablen |
+| `~/stacks/n8n/` | `n8n` | n8n | `docker.n8n.io/n8nio/n8n:2.40.5` | `.env` (600): alle 9 Variablen |
 | `~/litellm/` | `litellm` | litellm | `litellm:v1.85.0` | `.env` (600) |
-| `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.8`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
+| `~/stacks/nextcloude/` (seit 28.09.) | `nextcloude` (Tippfehler, so lassen) | nextcloud, nextcloud-db | `nextcloud:33.0.9`, `mariadb:11.4.13` | `.env` (600): 10 Variablen, pro Dienst unter `environment` als `${VAR}` |
 | Portainer-Stack 4, **gestoppt 28.09.** | `watchover` (Tippfehler, so lassen) | watchtower | ungepinnt | Klartext in der Portainer-Datei |
 | von Hand (`docker run`) | – | portainer | – | – |
 
@@ -278,6 +278,7 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 - **`dahub-wochenbilanz.timer`** (seit 28.09.): montags 08:05, `~/stacks/bin/dahub-wochenbilanz.sh` → eine Meldung: Sonntagslauf (Totmann: fehlt er oder ist er älter als 48 h → Priorität high), Container laufend/ungesund (erwartet = `restart always|unless-stopped`), Indexierung pending/done und neu endgültig gescheitert seit der Vorwoche (Stand in `~/.local/state/dahub-wochenbilanz.stand`, Basis 28.09.: done 111'425, endgültig 1'107), verfügbare Freigabe-Updates. `--anzeigen` = nur ausgeben, nichts senden, nichts merken
 - Wartungsflag `~/.local/state/dahub-wartung` pausiert Worker, Scan und Nextcloud-Cron über feste Drop-ins `dahub-wartung.conf` (`ConditionPathExists=!…`)
 - `~/scripts/check-index-fehler.sh` + `index-fehler.timer`: täglich 08:00, meldet endgültig gescheiterte Indexierungen (siehe Wissensbasis)
+- **Freigabe-Knopf (Phase 4, seit 30.09.):** `check-versionen.py` legt Angebote in `update_angebote` an (neueste Version ≥ 7 Tage, LiteLLM-Sperrliste, Docker-Tag vorhanden – n8n über Docker Hub `n8nio/n8n`, weil `docker.n8n.io` anonym mit HTTP 429 antwortet; Kurzfassung der Release Notes über das Gateway mit `claude-haiku`, Notes als Daten). Der da-agent schickt jedes Angebot mit «Einspielen» / «Später» (3 Tage) / «Überspringen», markiert ersetzte als «ersetzt durch …», meldet Ergebnisse, wertet `laeuft` > 3 h als Fehler. «Einspielen» startet die User-Unit `dahub-freigabe@<id>.service` (Linger aktiv) → `dahub-freigabe.sh` liest Dienst und Version aus der Datenbank, `--simulieren`, bei Grün echter Lauf; anderer Lauf aktiv → Angebot bleibt offen mit Hinweis. `check-versionen.py --nur n8n|litellm` begrenzt auf einen Dienst
 - `check-versionen.py` + `versions-check.timer`: **wöchentlich**, montags 08:15; prüft die gepinnten Images n8n und LiteLLM auf neuere Versionen, mit Wiederholungssperre. Stand 15.09.: n8n 2.37.10 → 2.39.5, LiteLLM 1.85.0 → 1.101.0 verfügbar
 - `unattended-upgrades` 2.12 installiert und aktiv (`APT::Periodic::Unattended-Upgrade "1"`)
 - Docker-Healthchecks nur bei drei Containern (siehe oben)
@@ -307,6 +308,16 @@ Persönlicher Always-on-Agent über Telegram. Kanal-Adapter-Architektur: WhatsAp
 5. **Korrektur:** alle 10 Stellen `… | grep -q` / `… | head` in `dahub-update.sh` und `dahub-wochenbilanz.sh` auf Variable + Here-String bzw. `${var%%$'\n'*}` umgestellt; auf dem Server 200/200 für alle drei Drop-ins, alle 10 Funktionstests grün. Sicherungen: `~/tmp/p3-backup/` (vor Phase 3), `~/tmp/p3-backup2/` (vor der Korrektur)
 6. **David (sudo):** `/run/systemd/system/wissensbasis-worker.service.d/pause.conf` entfernt, vier Units installiert, `daemon-reload`, beide Timer enabled; `NeedDaemonReload=no` geprüft. Erster Timerlauf So 04.10. 03:30, erste Bilanz Mo 05.10. 08:05
 7. **Zweiter Handlauf** seit 22:01:38 (`--gruppe auto`, ohne `--still`, Ergebnis per ntfy): **brach um 23:11:49 ab** («Worker nach 70 min noch aktiv»), ohne Eingriff an Containern; zwei Meldungen (high + urgent). Ursache und Behebung siehe Änderungsprotokoll 29.09.
+
+## Änderungsprotokoll 30.09.2026 (Phase 4: Freigabe-Knopf; n8n 2.40.5, Nextcloud 33.0.9)
+
+1. **Linger** für `david` aktiviert (David, sudo): `Linger=yes`, `systemctl --user` läuft → User-Unit ohne sudo im Betrieb
+2. **n8n-Datenbank:** SQLite (`database.sqlite` + WAL) im Volume `n8n_n8n_data`, dazu `config` mit dem Verschlüsselungsschlüssel. **Sicherung in `dahub-update.sh`:** n8n stoppen, Volume per Hilfscontainer (bisheriges n8n-Image, als root) nach `~/backup/n8n-<zeit>.tar.gz` (600), letzte 4 bleiben; bei rotem Test Volume aus der Sicherung zurück + altes Image. `--simulieren`: Probesicherung ohne Stopp, Wiederherstellung in ein Testvolume, `sqlite3 PRAGMA integrity_check` + Anzahl Workflows/Credentials, Testvolume wird entfernt
+3. **Ergänzung b):** Angebot > 3 h `laeuft` → `fehler` mit Meldung; `flock` belegt → «Anderer Lauf aktiv, bitte später erneut», Angebot bleibt offen. **Ergänzung c):** Montagsbilanz meldet Hauptversionen der Gruppe auto als Hinweis ohne Knopf (erster Treffer: nextcloud-db 11.4.13 → 13.0.2)
+4. **Tests:** 21 Python-Mocktests (Karenz, Sperrliste, übersprungen/ersetzt, Prompt-Grenze gegen Injection, fremde Chat-ID, doppeltes Tippen, alter Knopf, feste Befehlsliste des Unit-Starts), 9 Fälle für `dahub-freigabe.sh` (u. a. ID mit Shell-Zeichen), Probe `dahub-freigabe@999999` (unbekannt, nichts geändert)
+5. **Eingespielt** (Commit `7194df1`, Sicherungen `*.bak-20260930-vor-phase4`), `da-agent` neu gestartet (David, sudo), Selbsttest «Alles bereit». Simulation `--gruppe auto` mit der neuen Fassung grün
+6. **Erstes Angebot #1: n8n 2.37.10 → 2.40.5** (2.41.x noch in der Karenz). Knopf «Einspielen» 12:57 → Simulation grün (Probe ok, 4 Workflows, 3 Credentials) → echter Lauf mit Sicherung `n8n-20260930-125820.tar.gz` → Test grün 12:58:33, Commit `05105f2`. Geprüft: Image-ID = Tag, healthy, `/healthz` 200, 4 Workflows, 3 Credentials, 0× «Mismatching encryption keys», Angebot `erledigt`. Hinweis: 4× `X-Forwarded-For`-Warnung (Tailscale Serve; optional `N8N_PROXY_HOPS=1`). Kurzfassung hatte nur 2 statt 3–5 Stichpunkte – offen
+7. **Nextcloud 33.0.9 begleitet** (am Sonntag fällig gewesen): Simulation grün, echter Lauf 13:14:27–13:15:01, Wartungsmodus 23 s, Dump `nextcloud-20260930-1314.sql` (101 MB, 134 Tabellen; 37 MB kleiner als am 28.09., weil der Cron 34,5 MB veraltete `oc_file_locks` und `oc_jobs` aufgeräumt hat), Tests grün (occ, WebDAV, Funnel), App-Passwörter 20 → 20, Commit `b0ebc3e`
 
 ## Änderungsprotokoll 29.09.2026 (Punkt G: Worker-Stufen 1–5)
 
@@ -389,14 +400,14 @@ Ziel laut `CLAUDE.md`: Unterhalt senken durch Vollautomatik + Freigabe-Knopf. Ph
    - Punkt G (gescheiterte Indexierungen) – Auswertung 29.09. begonnen
    - ~~DNS (Punkt K)~~ erledigt 29.09.; Kontrolle nach der nächsten automatischen Lease-Erneuerung
    - Nach So 04.10. / Mo 05.10.: ersten Timerlauf und erste Wochenbilanz prüfen
-2. **Danach gilt das Aufsetzen als abgeschlossen.** Phase 4 (Freigabe-Knopf im Telegram-Agenten) ist **zurückgestellt**; n8n und LiteLLM bis dahin von Hand mit `dahub-update.sh --dienst … --version …`
+2. **Phase 4 (Freigabe-Knopf) in Betrieb seit 30.09.** (siehe Änderungsprotokoll 30.09.). Früherer Stand: zurückgestellt; n8n und LiteLLM bis dahin von Hand mit `dahub-update.sh --dienst … --version …`
 3. **Dann:** Punkt G (steigende Zahl endgültig gescheiterter Indexierungen) und anschliessend die Anwendungen (Roadmap «Agent richtig einsetzen»)
 
 ## Offene Punkte
 
 ### Aus Phase 1 (27.09.2026)
 
-A. ~~Nextcloud-Übernahme (Stack 2)~~ **erledigt 28.09.2026 19:56** (siehe Änderungsprotokoll 28.09.). Offen daraus nur noch: n8n-Credential «NextCloud account» einmal von Hand mit «Test» prüfen; Funnel einmal von aussen (Mobilnetz) aufrufen
+A. ~~Nextcloud-Übernahme (Stack 2)~~ **vollständig erledigt** (28.09. Übernahme; 30.09. n8n-Credential «NextCloud account» von David mit «Test» geprüft: in Ordnung; Funnel von aussen noch offen) (siehe Änderungsprotokoll 28.09.). Offen daraus nur noch: n8n-Credential «NextCloud account» einmal von Hand mit «Test» prüfen; Funnel einmal von aussen (Mobilnetz) aufrufen
 B. **LAN-Erreichbarkeit der Ports 5678 (n8n), 8080 (nextcloud), 3000 (gotenberg) und 9092 (ntfy) prüfen.** Alle vier sind auf 0.0.0.0 gebunden; Docker umgeht ufw häufig. Tailscale Serve/Funnel zeigen auf `localhost`/`127.0.0.1`, eine Bindung auf `127.0.0.1` würde genügen
 C. Nextcloud 33.0.9 verfügbar – erster Anwendungsfall für `dahub-update.sh` (Phase 2)
 D. ~~Nextcloud-Hintergrundjobs auf Cron umstellen~~ **erledigt 28.09.2026** (`nextcloud-cron.timer`, Modus `cron`, siehe Änderungsprotokoll)
@@ -453,7 +464,7 @@ UPDATE file_jobs SET status='pending', attempts=0, last_error=NULL WHERE status=
 2. **Passwörter in der Prozessliste** (zurückgestellt am 15.09.): `wissensbasis-worker.service` und `-scan.service` nutzen zwar `EnvironmentFile` und `${…}`-Platzhalter, übergeben Nextcloud- und Postgres-Passwort aber als Kommandozeilenargumente – dadurch in `ps aux` und `systemctl status` sichtbar. Beide Skripte kennen heute nur `argparse` (`required=True`), kein `os.environ`. **`frage.py` zeigt das Zielmuster** (`DAHUB_PG_PASSWORD`). Umbau plus Rotation beider Werte in eigener Sitzung
 3. Alten Wissensbasis-Bot stilllegen, sobald die Indexierung durch ist: `wissensbasis-telegram.service` + `telegram_bot.py` nach `~/archiv/` (existiert noch nicht), danach Token in BotFather widerrufen. `frage.py` muss bleiben
 4. Zwei verwaiste n8n-Credentials löschen («NextCloud account 2» und «3»)
-5. LiteLLM-Upgrade (1.85.0 → 1.101.0 verfügbar), danach Datenbank und virtueller Key mit Budget für den Agenten. Ebenso n8n 2.37.10 → 2.39.5
+5. LiteLLM-Upgrade (1.85.0 → 1.101.0 verfügbar, wird ab Mo 05.10. per Knopf angeboten), danach Datenbank und virtueller Key mit Budget für den Agenten. ~~n8n~~ erledigt 30.09. (2.40.5)
 6. msmtp-Ersatzkanal für `notify.sh` einrichten (nicht installiert)
 7. PST: Hockey-Club-Davos-PSTs auf den Server kopieren und importieren. Auslagern der 45 GB ist bei 631 GB frei nicht dringend
 8. Weitere LLM-Anbieter ins Gateway (ursprünglich geplant: GPT, Gemini, Grok, Perplexity – je eigener API-Key mit Budget); Open WebUI als Chat-Oberfläche
