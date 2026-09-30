@@ -14,9 +14,10 @@ cat > "$T/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 [ "$1" = --user ] && { shift; user=1; }
 case "$1" in
-  list-unit-files) if [ -n "${user:-}" ]; then echo "dahub-selbstpruefung.timer enabled enabled"; else
+  list-unit-files) if [ -n "${user:-}" ]; then echo "dahub-selbstpruefung.timer enabled enabled"; echo "dahub-sonstig.timer enabled enabled"; else
                      echo "dahub-update.timer enabled enabled"; echo "wissensbasis-worker.timer enabled enabled"; fi ;;
-  is-active) case "$2" in wissensbasis-worker.timer) echo "${T_WORKER:-active}" ;; *) echo active ;; esac ;;
+  is-active) case "$2" in wissensbasis-worker.timer) echo "${T_WORKER:-active}" ;; dahub-selbstpruefung.timer) echo inactive ;;
+                           dahub-sonstig.timer) echo "${T_USER:-active}" ;; *) echo active ;; esac ;;
 esac
 EOF
 cat > "$T/bin/uname" <<'EOF'
@@ -57,6 +58,7 @@ fall "Funktionstest rot"      high    "Funktionstests rot: t_docling"           
 fall "Container gestoppt"     high    "Container: nextcloud exited"                C_NC=exited H_NC=-
 fall "Container unhealthy"    high    "nextcloud unhealthy"                        H_NC=unhealthy
 fall "Timer inaktiv"          high    "Timer inaktiv: wissensbasis-worker.timer"   T_WORKER=inactive
+fall "User-Timer inaktiv"     high    "Timer inaktiv: dahub-sonstig.timer (user)"  T_USER=inactive
 fall "DNS von dhcpcd"         high    "DNS: resolv.conf nicht von Tailscale"       DAHUB_RESOLV=$T/resolv-dhcp
 touch "$T/flag"
 fall "Wartungsflag steht"     high    "Wartungsflag steht"

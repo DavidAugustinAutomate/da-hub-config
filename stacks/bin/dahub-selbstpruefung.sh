@@ -39,7 +39,9 @@ else ok; fi
 
 # 3 Timer (System und User) + da-agent
 timer=$(systemctl list-unit-files --type=timer --state=enabled --no-legend 'dahub-*.timer' 'wissensbasis-*.timer' 2>/dev/null | awk '{print $1}')
-utimer=$(systemctl --user list-unit-files --type=timer --state=enabled --no-legend 'dahub-*.timer' 2>/dev/null | awk '{print $1}')
+# ohne den eigenen Timer: er startet diese Pruefung nach dem Neustart; beim Aufruf von Hand ist er
+# (bis zum naechsten Neustart) inaktiv, das waere ein falscher roter Punkt
+utimer=$(systemctl --user list-unit-files --type=timer --state=enabled --no-legend 'dahub-*.timer' 2>/dev/null | awk '$1 != "dahub-selbstpruefung.timer" {print $1}')
 inaktiv=()
 for t in $timer; do [ "$(systemctl is-active "$t")" = active ] || inaktiv+=("$t"); done
 for t in $utimer; do [ "$(systemctl --user is-active "$t")" = active ] || inaktiv+=("$t (user)"); done
