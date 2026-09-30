@@ -12,6 +12,11 @@ import requests
 
 import process_jobs as pj
 
+# Stufe 6: Die Duplikatsuche wuerde mit gemockten Verbindungen ein 'Duplikat' finden.
+# In allen aelteren Tests aus, in den Stufe-6-Tests gezielt an.
+DUPLIKAT_ORIGINAL = pj.duplikat_suchen
+pj.duplikat_suchen = lambda *a, **k: None
+
 
 def args(**kw):
     a = types.SimpleNamespace(docling_url="http://d:5001", ollama_url="http://o:11434",
@@ -365,7 +370,7 @@ class Stufe5FristGrenze(unittest.TestCase):
             pj.store_document(conn, 1, "/a", "a", "h", ["c"], [[0.0] * 1024], True, 999)
         sqls = [c.args for c in cur.execute.call_args_list]
         ins = [s for s in sqls if "INSERT INTO documents" in s[0]][0]
-        self.assertIn("text_gekuerzt", ins[0]); self.assertEqual(ins[1][-2:], (True, 999))
+        self.assertIn("text_gekuerzt", ins[0]); self.assertEqual(ins[1][-3:], (True, 999, False))   # + text_verschluesselt (Stufe 6)
         ft = [s for s in sqls if "UPDATE file_tracking" in s[0]][0]
         self.assertEqual(ft[1][0], "gekuerzt")
 
@@ -389,6 +394,188 @@ class Stufe5FristGrenze(unittest.TestCase):
             rc = pj.main()
         self.assertEqual(rc, 0)
         self.assertEqual(len(claims), 2)   # Runde bei 10 und 20 min, bei 30 min Schluss
+
+
+class FakeZelle:
+    def __init__(self, ctype, value):
+        self.ctype, self.value = ctype, value
+
+
+class FakeXlrdError(Exception):
+    pass
+
+
+def fake_xlrd(verhalten="ok"):
+    """Minimaler Ersatz fuer xlrd 2.x (nur was xls_text nutzt)."""
+    blatt = types.SimpleNamespace(
+        name="Umsatz", nrows=3,
+        row=lambda r: [[FakeZelle(1, "Standort"), FakeZelle(1, "Betrag")],
+                       [FakeZelle(1, "Zürich"), FakeZelle(2, 1234.0), FakeZelle(0, "")],
+                       [FakeZelle(1, "Bern"), FakeZelle(2, 12.5), FakeZelle(3, 45000.0)]][r])
+    def open_workbook(file_contents, on_demand):
+        if verhalten == "verschluesselt":
+            raise FakeXlrdError("Workbook is encrypted")
+        if verhalten == "kaputt":
+            raise FakeXlrdError("Unsupported format, or corrupt file")
+        return types.SimpleNamespace(sheets=lambda: [blatt], datemode=0, release_resources=lambda: None)
+    import datetime as _dt
+    return types.SimpleNamespace(
+        XL_CELL_EMPTY=0, XL_CELL_TEXT=1, XL_CELL_NUMBER=2, XL_CELL_DATE=3, XL_CELL_BOOLEAN=4,
+        XL_CELL_ERROR=5, XL_CELL_BLANK=6, open_workbook=open_workbook,
+        xldate_as_datetime=lambda v, m: _dt.datetime(1899, 12, 30) + _dt.timedelta(days=v),
+        biffh=types.SimpleNamespace(XLRDError=FakeXlrdError))
+
+
+OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+MIME = (b"MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"X\"\r\n\r\n"
+        b"--X\r\nContent-Type: text/html; charset=\"utf-8\"\r\n\r\n<html><body><frameset></frameset></body></html>\r\n"
+        b"--X\r\nContent-Type: text/html; charset=\"utf-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
+        b"<html><body><table><tr><td>Z=C3=BCrich</td><td>42</td></tr></table></body></html>\r\n"
+        b"--X\r\nContent-Type: image/png\r\n\r\nPNG\r\n--X--\r\n")
+
+
+class Stufe6(unittest.TestCase):
+    def setUp(self):
+        self.dup = mock.patch.object(pj, "duplikat_suchen", DUPLIKAT_ORIGINAL)
+        self.dup.start()
+
+    def tearDown(self):
+        self.dup.stop()
+
+    def test_ooxml_verschluesselt(self):
+        verschl = OLE + b"\x00" * 100 + "EncryptedPackage".encode("utf-16-le")
+        self.assertTrue(pj.ooxml_verschluesselt(verschl))
+        self.assertFalse(pj.ooxml_verschluesselt(OLE + "Workbook".encode("utf-16-le")))   # normales xls
+        self.assertFalse(pj.ooxml_verschluesselt(b"PK\x03\x04..."))
+
+    def test_verschluesselte_xlsx_ohne_docling(self):
+        verschl = OLE + "EncryptionInfo".encode("utf-16-le")
+        with mock.patch.object(pj.requests, "request") as r:
+            with self.assertRaises(pj.Verschluesselt):
+                pj.extract_text("http://d", "http://u", "Liste.xlsx", verschl)
+        r.assert_not_called()
+
+    def test_mime_xls_html_an_docling(self):
+        ok = mock.Mock(status_code=200)
+        ok.json.return_value = {"status": "success", "document": {"md_content": "| Zürich | 42 |"}}
+        with mock.patch.object(pj.requests, "request", return_value=ok) as r:
+            t = pj.extract_text("http://d", "http://u", "Bericht.xls", MIME)
+        self.assertEqual(t, "| Zürich | 42 |")
+        self.assertEqual(r.call_count, 1)                               # nur docling, kein LibreOffice
+        name, inhalt = r.call_args.kwargs["files"]["files"]
+        self.assertEqual(name, "Bericht.xls.html")
+        self.assertIn("Zürich", inhalt.decode())                        # quoted-printable dekodiert
+        self.assertIn("<frameset>", inhalt.decode())                    # alle HTML-Teile
+
+    def test_xls_direkt_mit_xlrd(self):
+        with mock.patch.object(pj, "xlrd", fake_xlrd(), create=True), mock.patch.object(pj, "HAVE_XLRD", True), \
+             mock.patch.object(pj.requests, "request") as r:
+            t = pj.extract_text("http://d", "http://u", "Alt.xls", OLE + b"Workbook")
+        r.assert_not_called()                                           # weder LibreOffice noch docling
+        self.assertEqual(t.splitlines(), ["## Blatt: Umsatz", "Standort | Betrag", "Zürich | 1234",
+                                          "Bern | 12.5 | 2023-03-15 00:00:00"])
+
+    def test_xls_verschluesselt(self):
+        with mock.patch.object(pj, "xlrd", fake_xlrd("verschluesselt"), create=True), mock.patch.object(pj, "HAVE_XLRD", True), \
+             mock.patch.object(pj.requests, "request") as r:
+            with self.assertRaises(pj.Verschluesselt):
+                pj.extract_text("http://d", "http://u", "Alt.xls", OLE + b"Workbook")
+        r.assert_not_called()
+
+    def test_xls_kaputt_faellt_auf_libreoffice_zurueck(self):
+        lo = mock.Mock(status_code=500, text="kaputt", content=b"")
+        with mock.patch.object(pj, "xlrd", fake_xlrd("kaputt"), create=True), mock.patch.object(pj, "HAVE_XLRD", True), \
+             mock.patch.object(pj.requests, "request", return_value=lo) as r:
+            with self.assertRaises(RuntimeError) as cm:
+                pj.extract_text("http://d", "http://u", "Alt.xls", OLE + b"Workbook")
+        self.assertIn("LibreOffice-Fehler (500) bei .xls", str(cm.exception))
+        self.assertIn("/request", r.call_args.args[1])
+
+    def test_ohne_xlrd_bisheriger_weg(self):
+        lo = mock.Mock(status_code=500, text="x", content=b"")
+        with mock.patch.object(pj, "HAVE_XLRD", False), mock.patch.object(pj.requests, "request", return_value=lo) as r:
+            with self.assertRaises(RuntimeError):
+                pj.extract_text("http://d", "http://u", "Alt.xls", OLE + b"Workbook")
+        self.assertIn("/request", r.call_args.args[1])
+
+    def _process(self, extract=None, dup=None, simulieren=False, lese=None):
+        sess = mock.Mock(); sess.get.return_value = mock.Mock(status_code=200, content=b"Inhalt")
+        with mock.patch.object(pj, "duplikat_suchen", return_value=dup) as ds, \
+             mock.patch.object(pj, "extract_text", side_effect=extract) as ex, \
+             mock.patch.object(pj, "embed_batch", side_effect=lambda u, t: [[0.0] * 1024] * len(t)), \
+             mock.patch.object(pj, "store_document") as store:
+            info = pj.process_one({"id": 1, "origin_path": "/a/b.xlsx", "action": "created", "old_path": None},
+                                  sess, args(), None if simulieren else mock.MagicMock(), simulieren=simulieren, lese_conn=lese)
+        return info, store, ex, ds
+
+    def test_process_verschluesselt_ohne_text(self):
+        info, store, _, _ = self._process(extract=pj.Verschluesselt("kennwortgeschuetzt"))
+        a, kw = store.call_args.args, store.call_args.kwargs
+        self.assertEqual((a[5], a[6]), ([], []))
+        self.assertTrue(kw["verschluesselt"])
+        self.assertIn("verschluesselt, ohne Text", info)
+
+    def test_process_duplikat_uebernimmt_chunks(self):
+        dup = {"id": 77, "gekuerzt": False, "zeichen_gesamt": 1000, "verschluesselt": False, "n": 3}
+        info, store, ex, _ = self._process(extract=AssertionError("darf nicht umwandeln"), dup=dup)
+        ex.assert_not_called()
+        self.assertEqual(store.call_args.kwargs["kopie_von"], 77)
+        self.assertIn("Duplikat von Dokument #77 (3 Chunks", info)
+
+    def test_simulation_duplikat_nur_lesend(self):
+        dup = {"id": 77, "gekuerzt": True, "zeichen_gesamt": 900000, "verschluesselt": False, "n": 285}
+        lese = mock.Mock()
+        info, store, ex, ds = self._process(dup=dup, simulieren=True, lese=lese)
+        store.assert_not_called(); ex.assert_not_called()
+        self.assertIs(ds.call_args.args[0], lese)                       # Suche ueber die lesende Verbindung
+        self.assertIn("gekuerzt", info)
+
+    def test_store_kopie_und_status(self):
+        conn = mock.MagicMock()
+        cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.side_effect = [("processing",), (42,)]
+        with mock.patch.object(pj, "execute_values") as ev:
+            pj.store_document(conn, 1, "/a", "a", "h", [], [], True, 900000, False, kopie_von=77)
+        ev.assert_not_called()
+        sqls = [c.args for c in cur.execute.call_args_list]
+        kopie = [s for s in sqls if "SELECT %s, chunk_index" in s[0]][0]
+        self.assertEqual(kopie[1], (42, 77))
+        self.assertEqual([s for s in sqls if "UPDATE file_tracking" in s[0]][0][1][0], "gekuerzt")
+        cur.fetchone.side_effect = [("processing",), (43,)]
+        pj.store_document(conn, 1, "/b", "b", "h", [], [], verschluesselt=True)
+        sqls = [c.args for c in cur.execute.call_args_list]
+        self.assertEqual([s for s in sqls if "UPDATE file_tracking" in s[0]][-1][1][0], "verschluesselt")
+        self.assertEqual([s for s in sqls if "INSERT INTO documents" in s[0]][-1][1][-1], True)
+
+    def test_duplikat_markierungen_und_eigener_pfad(self):
+        """Markierungen gekuerzt/verschluesselt gehen mit; Pfad, Dateiname und Quelle bleiben die des Duplikats."""
+        for dup in ({"id": 77, "gekuerzt": True, "zeichen_gesamt": 2907925, "verschluesselt": False, "n": 285},
+                    {"id": 78, "gekuerzt": False, "zeichen_gesamt": None, "verschluesselt": True, "n": 0}):
+            sess = mock.Mock(); sess.get.return_value = mock.Mock(status_code=200, content=b"Inhalt")
+            pfad = "/remote.php/dav/files/wissensbasis-bot/Wissensbasis/Kramer Gastronomie AG/Mails/2024/Anhang.xlsx"
+            with mock.patch.object(pj, "duplikat_suchen", return_value=dup),                  mock.patch.object(pj, "store_document") as store:
+                pj.process_one({"id": 9, "origin_path": pfad, "action": "created", "old_path": None},
+                               sess, args(), mock.MagicMock())
+            a, kw = store.call_args.args, store.call_args.kwargs
+            self.assertEqual((a[2], a[3]), (pfad, "Anhang.xlsx"))              # eigener Pfad + Dateiname
+            self.assertEqual((a[7], a[8], a[9]), (dup["gekuerzt"], dup["zeichen_gesamt"], dup["verschluesselt"]))
+            self.assertEqual(kw["kopie_von"], dup["id"])
+        conn = mock.MagicMock(); cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.side_effect = [("processing",), (42,)]
+        pj.store_document(conn, 9, pfad, "Anhang.xlsx", "h", [], [], True, 2907925, False, kopie_von=77)
+        ins = [c.args for c in cur.execute.call_args_list if "INSERT INTO documents" in c.args[0]][0]
+        self.assertEqual(ins[1][:4], (pfad, "Anhang.xlsx", "h", "kgag"))        # Quelle aus dem eigenen Pfad
+
+    def test_duplikat_suchen(self):
+        self.assertIsNone(pj.duplikat_suchen(None, "h", "/a"))
+        conn = mock.MagicMock(); cur = conn.cursor.return_value.__enter__.return_value
+        cur.fetchone.return_value = (5, False, 10, True, 0)
+        d = pj.duplikat_suchen(conn, "h", "/a")
+        self.assertEqual(d, {"id": 5, "gekuerzt": False, "zeichen_gesamt": 10, "verschluesselt": True, "n": 0})
+        sql, params = cur.execute.call_args.args
+        self.assertIn("origin_path <> %s", sql); self.assertEqual(params, ("h", "/a"))
+        cur.fetchone.return_value = None
+        self.assertIsNone(pj.duplikat_suchen(conn, "h", "/a"))
 
 
 if __name__ == "__main__":

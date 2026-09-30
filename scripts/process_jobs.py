@@ -36,6 +36,8 @@ keinen Job-Status. Ausgabe nur mit ID und Endung, ohne Dateinamen.
 
 import argparse
 import csv
+import email
+import email.policy
 import hashlib
 import io
 import re
@@ -490,6 +492,97 @@ def xlsx_text(content):
     return "\n".join(teile).replace("\x00", "")
 
 
+# ---------------------------------------------------------------- Stufe 6 (30.09.2026)
+# Alte xls direkt mit xlrd (Debian-Paket python3-xlrd) statt ueber LibreOffice,
+# verschluesselte Office-Dateien als Dokument ohne Text, getarnte MIME-Dateien.
+try:
+    import xlrd
+    HAVE_XLRD = True
+except ImportError:
+    HAVE_XLRD = False
+
+OLE_KOPF = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+class Verschluesselt(Exception):
+    """Die Datei ist kennwortgeschuetzt. Ohne Kennwort gibt es keinen Text:
+    sie wird als Dokument ohne Text indexiert und als 'verschluesselt' markiert."""
+
+
+def ooxml_verschluesselt(content):
+    """Kennwortgeschuetzte xlsx/docx/pptx sind kein ZIP, sondern ein OLE-Container
+    mit den Streams 'EncryptionInfo' und 'EncryptedPackage'."""
+    return content[:8] == OLE_KOPF and ("EncryptedPackage".encode("utf-16-le") in content
+                                        or "EncryptionInfo".encode("utf-16-le") in content)
+
+
+def ist_mime(content):
+    """Excel-Webarchiv (.mht), unter .xls gespeichert: beginnt mit 'MIME-Version'."""
+    return content.lstrip()[:12].upper() == b"MIME-VERSION"
+
+
+def mime_html(content):
+    """Alle HTML-Teile eines MIME-Archivs zu einem HTML-Dokument zusammenfuegen
+    (Excel legt die Blaetter als eigene Teile ab). -> str oder None"""
+    msg = email.message_from_bytes(content, policy=email.policy.default)
+    teile = []
+    for teil in msg.walk():
+        if teil.get_content_type() != "text/html":
+            continue
+        try:
+            html = teil.get_content()
+        except (LookupError, ValueError):
+            html = teil.get_payload(decode=True).decode("latin-1", "replace")
+        m = re.search(r"<body[^>]*>(.*)</body>", html, flags=re.S | re.I)
+        teile.append(m.group(1) if m else html)
+    if not teile:
+        return None
+    return "<html><body>\n" + "\n<hr>\n".join(teile) + "\n</body></html>"
+
+
+def xls_zelle(zelle, datemode):
+    if zelle.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK, xlrd.XL_CELL_ERROR):
+        return ""
+    if zelle.ctype == xlrd.XL_CELL_NUMBER:
+        v = zelle.value
+        return str(int(v)) if float(v).is_integer() else repr(v)
+    if zelle.ctype == xlrd.XL_CELL_DATE:
+        try:
+            return xlrd.xldate_as_datetime(zelle.value, datemode).isoformat(sep=" ")
+        except (ValueError, OverflowError):
+            return str(zelle.value)
+    if zelle.ctype == xlrd.XL_CELL_BOOLEAN:
+        return "WAHR" if zelle.value else "FALSCH"
+    return str(zelle.value).strip()
+
+
+def xls_text(content):
+    """Altes Excel (BIFF) direkt lesen: je Blatt eine Ueberschrift, je Zeile die
+    nichtleeren Zellen mit ' | ' getrennt."""
+    try:
+        wb = xlrd.open_workbook(file_contents=content, on_demand=True)
+    except xlrd.biffh.XLRDError as exc:
+        if "encrypt" in str(exc).lower():
+            raise Verschluesselt("xls kennwortgeschuetzt") from exc
+        raise
+    teile, laenge = [], 0
+    try:
+        for blatt in wb.sheets():
+            teile.append(f"## Blatt: {blatt.name}")
+            for r in range(blatt.nrows):
+                zellen = [w for w in (xls_zelle(z, wb.datemode) for z in blatt.row(r)) if w]
+                if zellen:
+                    zeile = " | ".join(zellen)
+                    laenge += len(zeile) + 1
+                    if laenge > TABELLE_MAX_ZEICHEN:
+                        teile.append("(gekuerzt)")
+                        return "\n".join(teile).replace("\x00", "")
+                    teile.append(zeile)
+    finally:
+        wb.release_resources()
+    return "\n".join(teile).replace("\x00", "")
+
+
 JFIF_ERSATZ_DPI = 96
 
 
@@ -525,10 +618,27 @@ def extract_text(docling_url, unoserver_url, filename, content):
     """Schickt die Datei an Docling und gibt den extrahierten Markdown-Text zurück.
     Ausnahmen: .msg (Outlook) läuft über extract-msg, alte Office-Binärformate
     (.doc/.xls/.ppt/.rtf) werden vorher über LibreOffice nach OOXML gewandelt."""
-    if filename.lower().endswith(".msg"):
+    klein = filename.lower()
+    if klein.endswith(".msg"):
         return extract_msg_text(content, filename)
-    if filename.lower().endswith(".csv"):
+    if klein.endswith(".csv"):
         return csv_text(content)
+
+    # Stufe 6: kennwortgeschuetzte Office-Dateien -> ohne Text (keine Entschluesselung)
+    if klein.endswith((".xlsx", ".xlsm", ".docx", ".pptx", ".xls", ".doc", ".ppt")) and ooxml_verschluesselt(content):
+        raise Verschluesselt("Office-Datei kennwortgeschuetzt (EncryptedPackage)")
+    if klein.endswith(".xls"):
+        if ist_mime(content):   # Excel-Webarchiv unter .xls: HTML-Teile an docling
+            html = mime_html(content)
+            if html is not None:
+                filename, content = filename + ".html", html.encode("utf-8")
+        elif HAVE_XLRD and content[:8] == OLE_KOPF:
+            try:
+                return xls_text(content)   # Verschluesselt geht an den Aufrufer
+            except Verschluesselt:
+                raise
+            except Exception as exc:  # Datei fuer xlrd ungewoehnlich -> bisheriger Weg (LibreOffice)
+                print(f"    xls-Leser: {type(exc).__name__}, weiter mit LibreOffice", flush=True)
 
     filename, content = convert_legacy(unoserver_url, filename, content)
 
@@ -620,35 +730,48 @@ def guess_source(origin_path):
 
 
 def store_document(pg_conn, job_id, origin_path, filename, content_hash, chunks, embeddings,
-                   gekuerzt=False, zeichen_gesamt=None):
+                   gekuerzt=False, zeichen_gesamt=None, verschluesselt=False, kopie_von=None):
     """Schreibt Dokument + Chunks. Bestehende Chunks werden vorher entfernt
     (Upsert), damit bei einer Neuverarbeitung keine Karteileichen bleiben.
     gekuerzt=True: nur ein Teil des Textes ist indexiert (Zeichengrenze oder
     Zeitwaechter) -> documents.text_gekuerzt und file_tracking.index_status
     'gekuerzt', damit die Datei abfragbar bleibt und spaeter vollstaendig
-    nachindexiert werden kann."""
+    nachindexiert werden kann.
+    verschluesselt=True: kennwortgeschuetzt, ohne Text -> text_verschluesselt,
+    index_status 'verschluesselt'.
+    kopie_von=<document_id>: Duplikat (gleicher Inhalts-Hash) – Chunks und
+    Embeddings werden in der Datenbank uebernommen statt neu erzeugt."""
+    status = "verschluesselt" if verschluesselt else "gekuerzt" if gekuerzt else "indexed"
     with pg_conn.cursor() as cur:
         assert_job_still_valid(cur, job_id)
         cur.execute(
             """INSERT INTO documents
                (origin_type, origin_path, filename, content_hash, source, indexed_at,
-                text_gekuerzt, text_zeichen_gesamt)
-               VALUES ('nextcloud_file', %s, %s, %s, %s, now(), %s, %s)
+                text_gekuerzt, text_zeichen_gesamt, text_verschluesselt)
+               VALUES ('nextcloud_file', %s, %s, %s, %s, now(), %s, %s, %s)
                ON CONFLICT (origin_type, origin_path) DO UPDATE SET
                  filename = EXCLUDED.filename,
                  content_hash = EXCLUDED.content_hash,
                  source = EXCLUDED.source,
                  text_gekuerzt = EXCLUDED.text_gekuerzt,
                  text_zeichen_gesamt = EXCLUDED.text_zeichen_gesamt,
+                 text_verschluesselt = EXCLUDED.text_verschluesselt,
                  updated_at = now()
                RETURNING id""",
-            (origin_path, filename, content_hash, guess_source(origin_path), gekuerzt, zeichen_gesamt),
+            (origin_path, filename, content_hash, guess_source(origin_path), gekuerzt, zeichen_gesamt,
+             verschluesselt),
         )
         document_id = cur.fetchone()[0]
 
         cur.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
 
-        if chunks:
+        if kopie_von is not None and kopie_von != document_id:
+            cur.execute(
+                """INSERT INTO chunks (document_id, chunk_index, content, embedding)
+                   SELECT %s, chunk_index, content, embedding FROM chunks WHERE document_id = %s""",
+                (document_id, kopie_von),
+            )
+        elif chunks:
             execute_values(
                 cur,
                 """INSERT INTO chunks (document_id, chunk_index, content, embedding)
@@ -665,10 +788,30 @@ def store_document(pg_conn, job_id, origin_path, filename, content_hash, chunks,
             """UPDATE file_tracking
                SET index_status = %s, indexed_at = now(), content_sha256 = %s
                WHERE origin_path = %s""",
-            ("gekuerzt" if gekuerzt else "indexed", content_hash, origin_path),
+            (status, content_hash, origin_path),
         )
     pg_conn.commit()
     return document_id
+
+
+def duplikat_suchen(conn, content_hash, origin_path):
+    """Bereits indexiertes Dokument mit gleichem Inhalt an einem anderen Pfad?
+    Bevorzugt eines mit Chunks. -> dict oder None"""
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT d.id, d.text_gekuerzt, d.text_zeichen_gesamt, d.text_verschluesselt,
+                      (SELECT count(*) FROM chunks c WHERE c.document_id = d.id) AS n
+               FROM documents d
+               WHERE d.origin_type = 'nextcloud_file' AND d.content_hash = %s AND d.origin_path <> %s
+               ORDER BY n DESC, d.id LIMIT 1""",
+            (content_hash, origin_path),
+        )
+        z = cur.fetchone()
+    if z is None:
+        return None
+    return {"id": z[0], "gekuerzt": bool(z[1]), "zeichen_gesamt": z[2], "verschluesselt": bool(z[3]), "n": z[4]}
 
 
 def handle_delete(pg_conn, job_id, origin_path):
@@ -721,9 +864,10 @@ def handle_move(pg_conn, job_id, new_path, old_path):
     return moved
 
 
-def process_one(job, session, args, pg_conn, simulieren=False):
+def process_one(job, session, args, pg_conn, simulieren=False, lese_conn=None):
     """simulieren=True: alles bis und mit Embedding, aber nichts speichern
-    (pg_conn ist dann None, auch kein Heartbeat)."""
+    (pg_conn ist dann None, auch kein Heartbeat). lese_conn: nur lesende
+    Verbindung fuer die Duplikatsuche in der Simulation."""
     job_start = time.time()
     action = job["action"]
     path = job["origin_path"]
@@ -751,10 +895,30 @@ def process_one(job, session, args, pg_conn, simulieren=False):
     heartbeat(pg_conn, job_id)  # Download geschafft
 
     content_hash = hashlib.sha256(content).hexdigest()  # immer vom Original
+
+    # Stufe 6: gleicher Inhalt schon indexiert (z. B. derselbe Anhang in mehreren Mails)?
+    # Dann Chunks und Embeddings uebernehmen statt Umwandlung und Embedding neu zu rechnen.
+    dup = duplikat_suchen(pg_conn if not simulieren else lese_conn, content_hash, path)
+    if dup is not None:
+        info = (f"Duplikat von Dokument #{dup['id']} ({dup['n']} Chunks uebernommen"
+                + (", verschluesselt" if dup["verschluesselt"] else "")
+                + (", gekuerzt" if dup["gekuerzt"] else "") + ")")
+        if not simulieren:
+            store_document(pg_conn, job_id, path, filename, content_hash, [], [],
+                           dup["gekuerzt"], dup["zeichen_gesamt"], dup["verschluesselt"], kopie_von=dup["id"])
+        return info
+
     content, dichte_korrigiert = jfif_dichte_korrigieren(content)
     hinweis = " (JFIF-Dichte korrigiert)" if dichte_korrigiert else ""
     t_umwandlung = time.time()
-    text = extract_text(args.docling_url, args.unoserver_url, filename, content)
+    try:
+        text = extract_text(args.docling_url, args.unoserver_url, filename, content)
+    except Verschluesselt as e:
+        # Keine Entschluesselung: Dokument ohne Text, abfragbar als 'verschluesselt'
+        if not simulieren:
+            store_document(pg_conn, job_id, path, filename, content_hash, [], [],
+                           False, None, verschluesselt=True)
+        return f"verschluesselt, ohne Text indexiert ({e})"
     t_umwandlung = time.time() - t_umwandlung
     heartbeat(pg_conn, job_id)  # Textextraktion geschafft (kann bis 10 Min dauern)
 
@@ -944,11 +1108,13 @@ def simulation(args, pg_params):
         jobs = cur.fetchall()
     session = requests.Session()
     session.auth = (args.nextcloud_user, args.nextcloud_password)
+    lese = psycopg2.connect(**pg_params)   # nur lesend: Duplikatsuche
+    lese.set_session(readonly=True, autocommit=True)
     zaehler = {"OK": 0, "FEHL": 0, "ZURUECK": 0}
     for job in jobs:
         t = time.time()
         try:
-            info = process_one(job, session, args, None, simulieren=True)
+            info = process_one(job, session, args, None, simulieren=True, lese_conn=lese)
             art = "OK"
         except DienstNichtErreichbar as e:
             info, art = f"{e} -> Job ginge ohne Versuch zurueck, Lauf endet", "ZURUECK"
