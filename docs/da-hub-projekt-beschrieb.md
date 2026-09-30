@@ -491,6 +491,11 @@ S. **Abschluss des Aufsetzens** – gilt erst, wenn ohne Eingriff funktioniert h
    - LiteLLM-Angebot am **05.10.** (nach `versions-check.timer` 08:15) als erster Knopf **ohne Begleitung**
    - DNS-Kontrolle aus K nach der nächsten automatischen Lease-Erneuerung
 T. **Künftige Updates von Docker und containerd** über den Freigabe-Knopf im Wartungsfenster mit Worker-Pause und Tests (Erweiterung von Phase 4 auf Host-Pakete, noch zu bauen); **Tailscale von Hand**, wenn David zu Hause ist (tailscaled-Neustart trennt SSH über Tailscale)
+U. **OpenAI und Perplexity im Gateway** – nach dem LiteLLM-Update vom 05.10. (Angebot per Knopf, siehe S):
+   - Schlüssel mit Ausgabenlimit erstellt David selbst und trägt sie mit `read -r -s` in `~/litellm/.env` ein (Werte nie anzeigen, nur Namen und Längen prüfen)
+   - danach fragt Claude die verfügbaren Modelle bei den Anbietern ab; David wählt die Kurznamen (Aliase in `~/litellm/config.yaml`)
+   - Test über das Gateway (je Alias ein Minimalaufruf); ersetzt Punkt 8 «Bisherige» für diese zwei Anbieter
+V. **Abgrenzung (Entscheid David, 30.09.2026):** Vor den Werkzeugen (Roadmap «Agent richtig einsetzen») zwingend sind nur **O und B** (Wartungsfenster zu Hause) und **S** (Sonntag 04.10. / Montag 05.10.). **Alles Übrige ist Wartungs-Backlog** für einen festen monatlichen Termin: **erster Samstag im Monat**. Die gescheiterten Dokumente werden nach Abarbeitung des Rückstands gemäss **G, R und N** nachgeholt
 L. **Repo-Stände der Skripte gegen den Server abgleichen:** `check-container.sh` und `notify.sh` lagen im Repo noch in der Fassung vor dem 09.09. (am 28.09. nachgeführt). Übrige Skripte in `scripts/` und Units in `systemd/` einmal mit `diff` gegen den Server prüfen
 
 ### Bisherige
